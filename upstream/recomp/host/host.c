@@ -4,9 +4,12 @@
 //   fnvhost <game.exe> [args...]
 //
 // An import with no shim stops the run and names itself â€” that list is the M2 work queue.
+#include <execinfo.h>
 #include <setjmp.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <unistd.h>
 #include "FNVGuestMemory.h"
 #include <pthread.h>
 #include <pthread/qos.h>
@@ -23,7 +26,13 @@ static _Thread_local CPU *import_cpu;
 void host_heap_fault(const char *why,uint32_t address,uint32_t expected,uint32_t actual){
     (void)why;(void)expected;(void)actual;
     CPU *c=import_cpu;
-    if(c){uint32_t esp=REG(c,R_ESP);fprintf(stderr,"[heap-context] guest=%#x eip=%#x caller=%#x eax=%#x ecx=%#x edx=%#x edi=%#x\n",address,REG(c,644),esp<=0xfffffffbu?G32(esp):0,REG(c,R_EAX),REG(c,R_ECX),REG(c,R_EDX),REG(c,28));}
+    if(c){
+        uint32_t esp=REG(c,R_ESP);
+        fprintf(stderr,"[heap-context] guest=%#x eip=%#x caller=%#x eax=%#x ecx=%#x edx=%#x edi=%#x\n",address,REG(c,644),esp<=0xfffffffbu?G32(esp):0,REG(c,R_EAX),REG(c,R_ECX),REG(c,R_EDX),REG(c,28));
+        if(esp<=0xffffff00u){fprintf(stderr,"[heap-stack] esp=%#x",esp);for(int i=0;i<40;i++)fprintf(stderr," %#x",G32(esp+4u*i));fprintf(stderr,"\n");}
+    }
+    void *frames[24]; int n = backtrace(frames, 24);
+    backtrace_symbols_fd(frames, n, STDERR_FILENO);
 }
 
 void rt_trap(CPU *c, int code, uint32_t addr) {
@@ -157,8 +166,34 @@ void rt_diag_return(CPU *c,uint32_t site,uint32_t callee) {
         site,callee,REG(c,0),REG(c,4),REG(c,16),REG(c,20));
 }
 
+static void on_fault(int sig, siginfo_t *si, void *uctx) {
+    (void)uctx;
+    uintptr_t raw = si ? (uintptr_t)si->si_addr : 0;
+    uintptr_t base = (uintptr_t)MEM;
+    uint64_t g = (MEM && raw >= base && raw - base < 0x100000000ULL) ? (uint64_t)(raw - base) : UINT64_MAX;
+    char buf[192];
+    int len = snprintf(buf, sizeof buf, "\n[host] FAULT sig=%d addr=%p guest=%#llx\n",
+                       sig, (void *)raw, (unsigned long long)g);
+    if (len > 0) write(STDERR_FILENO, buf, (size_t)len);
+    void *frames[32];
+    int n = backtrace(frames, 32);
+    backtrace_symbols_fd(frames, n, STDERR_FILENO);
+    _exit(128 + sig);
+}
+
+static void install_fault_handler(void) {
+    struct sigaction sa;
+    memset(&sa, 0, sizeof sa);
+    sa.sa_sigaction = on_fault;
+    sa.sa_flags = SA_SIGINFO | SA_RESETHAND;
+    sigemptyset(&sa.sa_mask);
+    sigaction(SIGBUS, &sa, NULL);
+    sigaction(SIGSEGV, &sa, NULL);
+}
+
 int fnv_run_game(int argc, char **argv) {
     if (argc < 2) { fprintf(stderr, "usage: %s game.exe [args]\n", argv[0]); return 2; }
+    install_fault_handler();
     void *p = fnv_reserve_guest();
     if (p == MAP_FAILED) { perror("reserve 4 GiB guest address space"); return 1; }
     MEM = p;

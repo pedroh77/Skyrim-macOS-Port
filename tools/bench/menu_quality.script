@@ -1,0 +1,8 @@
+# Quality-only scenario: stop on the "Start a new game?" confirmation and dump
+# that static frame.  The camera and UI are the same for every render setting,
+# so the three dumped frames are pixel-aligned across configurations.
+0 waitsteady 120 9
+10 tap 28
+20 waitsteady 90 20
+50 dump
+120 quit

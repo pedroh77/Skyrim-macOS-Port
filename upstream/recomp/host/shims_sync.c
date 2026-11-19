@@ -24,7 +24,30 @@ void *handle_get(uint32_t h, int type) {
     return i < MAXH && htab[i].type == type ? htab[i].obj : NULL;
 }
 int handle_type(uint32_t h) { uint32_t i = h / 4; return i < MAXH ? htab[i].type : 0; }
-void handle_close(uint32_t h) { uint32_t i = h / 4; if (i < MAXH) { htab[i].type = 0; htab[i].obj = NULL; } }
+void file_close_obj(void *obj) __attribute__((weak));
+void file_close_obj(void *obj) { (void)obj; }
+
+static void *handle_detach(uint32_t h, int *type_out) {
+    uint32_t i = h / 4;
+    void *obj = NULL;
+    int type = 0;
+    pthread_mutex_lock(&hlock);
+    if (i < MAXH && htab[i].type) {
+        type = htab[i].type;
+        obj = htab[i].obj;
+        htab[i].type = 0;
+        htab[i].obj = NULL;
+    }
+    pthread_mutex_unlock(&hlock);
+    if (type_out) *type_out = type;
+    return obj;
+}
+
+void handle_close(uint32_t h) {
+    int type = 0;
+    void *obj = handle_detach(h, &type);
+    if (type == H_FILE) file_close_obj(obj);
+}
 
 // ---- waitable objects ------------------------------------------------------------------------
 typedef struct {
@@ -137,9 +160,78 @@ static uint32_t wait_one(uint32_t h, uint32_t ms) {
     return 0;
 }
 
+// ---- named events / mutexes & thread-local I/O APC queue -------------------------------------
+#define MAX_NAMED 128
+static struct { int type; char name[128]; uint32_t handle; } named_objs[MAX_NAMED];
+static int n_named;
+static pthread_mutex_t named_lk = PTHREAD_MUTEX_INITIALIZER;
+
+static uint32_t find_named(int type, const char *name) {
+    if (!name || !name[0]) return 0;
+    pthread_mutex_lock(&named_lk);
+    uint32_t r = 0;
+    for (int i = 0; i < n_named; i++)
+        if (named_objs[i].type == type && !strcasecmp(named_objs[i].name, name)) { r = named_objs[i].handle; break; }
+    pthread_mutex_unlock(&named_lk);
+    return r;
+}
+static void register_named(int type, const char *name, uint32_t handle) {
+    if (!name || !name[0]) return;
+    pthread_mutex_lock(&named_lk);
+    if (n_named < MAX_NAMED) {
+        named_objs[n_named].type = type;
+        snprintf(named_objs[n_named].name, sizeof named_objs[n_named].name, "%s", name);
+        named_objs[n_named].handle = handle;
+        n_named++;
+    }
+    pthread_mutex_unlock(&named_lk);
+}
+
+#define MAX_APCS 64
+typedef struct { uint32_t fn, err, nbytes, ov; } ApcItem;
+static _Thread_local ApcItem apc_q[MAX_APCS];
+static _Thread_local int apc_h, apc_t;
+
+void host_queue_io_apc(uint32_t fn, uint32_t err, uint32_t nbytes, uint32_t ov) {
+    if (!fn) return;
+    int next = (apc_t + 1) % MAX_APCS;
+    if (next == apc_h) return;
+    apc_q[apc_t] = (ApcItem){fn, err, nbytes, ov};
+    apc_t = next;
+}
+static int drain_io_apcs(CPU *c) {
+    int ran = 0;
+    while (apc_h != apc_t) {
+        ApcItem item = apc_q[apc_h];
+        apc_h = (apc_h + 1) % MAX_APCS;
+        uint32_t esp = REG(c, R_ESP);
+        uint32_t sp = esp - 64;
+        P32(sp, HOST_EXIT_THUNK);
+        P32(sp + 4, item.err);
+        P32(sp + 8, item.nbytes);
+        P32(sp + 12, item.ov);
+        SETREG(c, R_ESP, sp);
+        rt_call(c, item.fn);
+        SETREG(c, R_ESP, esp);
+        ran++;
+    }
+    return ran;
+}
+
 SHIM(CreateEventA) {
+    const char *nm = GSTR(ARG(c, 3));
+    uint32_t ex = find_named(H_EVENT, nm);
+    if (ex) { SETERR(183 /* ERROR_ALREADY_EXISTS */); RET(c, ex, 4); return; }
     Obj *o = obj_new(); o->manual = (int)ARG(c, 1); o->signaled = (int)ARG(c, 2);
-    RET(c, handle_new(H_EVENT, o), 4);
+    uint32_t h = handle_new(H_EVENT, o);
+    register_named(H_EVENT, nm, h);
+    SETERR(0);
+    RET(c, h, 4);
+}
+SHIM(OpenEventA) {
+    uint32_t h = find_named(H_EVENT, GSTR(ARG(c, 2)));
+    if (!h) SETERR(2);
+    RET(c, h, 3);
 }
 SHIM(SetEvent) {
     Obj *o = handle_get(ARG(c, 0), H_EVENT);
@@ -163,9 +255,38 @@ SHIM(ReleaseSemaphore) {
     RET(c, 1, 3);
 }
 SHIM(CreateMutexA) {
+    const char *nm = GSTR(ARG(c, 2));
+    uint32_t ex = find_named(H_MUTEX, nm);
+    if (ex) { SETERR(183 /* ERROR_ALREADY_EXISTS */); RET(c, ex, 3); return; }
     Obj *o = obj_new();
     if (ARG(c, 1)) { o->owned = 1; o->owner = pthread_self(); o->recursion = 1; }
-    RET(c, handle_new(H_MUTEX, o), 3);
+    uint32_t h = handle_new(H_MUTEX, o);
+    register_named(H_MUTEX, nm, h);
+    SETERR(0);
+    RET(c, h, 3);
+}
+SHIM(OpenMutexA) {
+    uint32_t h = find_named(H_MUTEX, GSTR(ARG(c, 2)));
+    if (!h) SETERR(2);
+    RET(c, h, 3);
+}
+SHIM(ReleaseMutex) {
+    Obj *o = handle_get(ARG(c, 0), H_MUTEX);
+    if (!o) { SETERR(6); RET(c, 0, 1); return; }
+    pthread_mutex_lock(&o->m);
+    if (!o->owned || !pthread_equal(o->owner, pthread_self())) {
+        pthread_mutex_unlock(&o->m); SETERR(288); RET(c, 0, 1); return;
+    }
+    if (--o->recursion <= 0) { o->owned = 0; o->recursion = 0; pthread_cond_broadcast(&o->cv); }
+    pthread_mutex_unlock(&o->m);
+    RET(c, 1, 1);
+}
+SHIM(SleepEx) {
+    uint32_t ms = ARG(c, 0), alertable = ARG(c, 1);
+    if (alertable && drain_io_apcs(c) > 0) { RET(c, 0xC0u /* WAIT_IO_COMPLETION */, 2); return; }
+    if (ms && ms != 0xFFFFFFFFu) usleep((useconds_t)ms * 1000u);
+    if (alertable && drain_io_apcs(c) > 0) { RET(c, 0xC0u, 2); return; }
+    RET(c, 0, 2);
 }
 SHIM(WaitForSingleObject) {
     uint32_t h=ARG(c,0),ms=ARG(c,1);
@@ -241,15 +362,48 @@ SHIM(EnterCriticalSection) {
 SHIM(LeaveCriticalSection) { pthread_mutex_unlock(cs_get(ARG(c, 0))); RET(c, 0, 1); }
 SHIM(TryEnterCriticalSection) { RET(c, pthread_mutex_trylock(cs_get(ARG(c, 0))) == 0, 1); }
 
-// interlocked: real atomics on guest memory
-#define A32(a) ((_Atomic uint32_t *)(void *)(MEM + (a)))
-SHIM(InterlockedIncrement) { RET(c, __atomic_add_fetch((uint32_t *)(MEM + ARG(c, 0)), 1, __ATOMIC_SEQ_CST), 1); }
-SHIM(InterlockedDecrement) { RET(c, __atomic_sub_fetch((uint32_t *)(MEM + ARG(c, 0)), 1, __ATOMIC_SEQ_CST), 1); }
-SHIM(InterlockedExchange) { RET(c, __atomic_exchange_n((uint32_t *)(MEM + ARG(c, 0)), ARG(c, 1), __ATOMIC_SEQ_CST), 2); }
-SHIM(InterlockedExchangeAdd) { RET(c, __atomic_fetch_add((uint32_t *)(MEM + ARG(c, 0)), ARG(c, 1), __ATOMIC_SEQ_CST), 2); }
+// interlocked: real atomics on guest memory (with mutex fallback for unaligned guest addresses on ARM64)
+static pthread_mutex_t unaligned_ilock = PTHREAD_MUTEX_INITIALIZER;
+enum { IL_ADD, IL_XCHG, IL_CMPXCHG };
+static uint32_t il_unaligned(uint32_t a, int op, uint32_t val, uint32_t exp) {
+    pthread_mutex_lock(&unaligned_ilock);
+    uint32_t cur = 0, next = val, ret;
+    memcpy(&cur, MEM + a, 4);
+    if (op == IL_ADD) { next = cur + val; ret = next; }
+    else if (op == IL_XCHG) { ret = cur; }
+    else { ret = cur; if (cur != exp) next = cur; }
+    memcpy(MEM + a, &next, 4);
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+    pthread_mutex_unlock(&unaligned_ilock);
+    return ret;
+}
+SHIM(InterlockedIncrement) {
+    uint32_t a = ARG(c, 0);
+    RET(c, !(a & 3) ? __atomic_add_fetch((uint32_t *)(MEM + a), 1, __ATOMIC_SEQ_CST)
+                    : il_unaligned(a, IL_ADD, 1, 0), 1);
+}
+SHIM(InterlockedDecrement) {
+    uint32_t a = ARG(c, 0);
+    RET(c, !(a & 3) ? __atomic_sub_fetch((uint32_t *)(MEM + a), 1, __ATOMIC_SEQ_CST)
+                    : il_unaligned(a, IL_ADD, (uint32_t)-1, 0), 1);
+}
+SHIM(InterlockedExchange) {
+    uint32_t a = ARG(c, 0), v = ARG(c, 1);
+    RET(c, !(a & 3) ? __atomic_exchange_n((uint32_t *)(MEM + a), v, __ATOMIC_SEQ_CST)
+                    : il_unaligned(a, IL_XCHG, v, 0), 2);
+}
+SHIM(InterlockedExchangeAdd) {
+    uint32_t a = ARG(c, 0), v = ARG(c, 1);
+    RET(c, !(a & 3) ? __atomic_fetch_add((uint32_t *)(MEM + a), v, __ATOMIC_SEQ_CST)
+                    : il_unaligned(a, IL_ADD, v, 0) - v, 2);
+}
 SHIM(InterlockedCompareExchange) {
-    uint32_t exp = ARG(c, 2);
-    __atomic_compare_exchange_n((uint32_t *)(MEM + ARG(c, 0)), &exp, ARG(c, 1), 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
+    uint32_t a = ARG(c, 0), v = ARG(c, 1), exp = ARG(c, 2);
+    if (!(a & 3)) {
+        __atomic_compare_exchange_n((uint32_t *)(MEM + a), &exp, v, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
+    } else {
+        exp = il_unaligned(a, IL_CMPXCHG, v, exp);
+    }
     RET(c, exp, 3);
 }
 
@@ -347,7 +501,7 @@ SHIM(CloseHandle) {
         if (!dumped++) {
             uint32_t sp = REG(c, R_ESP);
             fprintf(stderr, "[thread]   stack:");
-            for (int i = 0, n = 0; i < 2048 && n < 24; i++) { uint32_t v = G32(sp + 4 * (uint32_t)i); if (v >= 0x401000 && v < 0xfdf000) { fprintf(stderr, " %#x", v); n++; } }
+            for (int i = 0, n = 0; i < 2048 && n < 24; i++) { uint32_t v = G32(sp + 4 * (uint32_t)i); if (v >= 0x401000 && v < 0x1080000) { fprintf(stderr, " %#x", v); n++; } }
             fprintf(stderr, "\n");
         }
     }
@@ -355,7 +509,8 @@ SHIM(CloseHandle) {
 }
 
 SHIM_TABLE(sync_shims,
-    E(CreateEventA) E(SetEvent) E(ResetEvent) E(CreateSemaphoreA) E(ReleaseSemaphore) E(CreateMutexA)
+    E(CreateEventA) E(OpenEventA) E(SetEvent) E(ResetEvent) E(CreateSemaphoreA) E(ReleaseSemaphore)
+    E(CreateMutexA) E(OpenMutexA) E(ReleaseMutex) E(SleepEx)
     E(WaitForSingleObject) E(WaitForMultipleObjects) E(InitializeCriticalSection)
     E(InitializeCriticalSectionAndSpinCount) E(DeleteCriticalSection) E(EnterCriticalSection)
     E(LeaveCriticalSection) E(TryEnterCriticalSection) E(InterlockedIncrement) E(InterlockedDecrement)

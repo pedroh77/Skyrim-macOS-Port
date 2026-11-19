@@ -1,120 +1,137 @@
-<p align="center">
-  <img src="docs/assets/fnv-icon.png" width="144" alt="FNV iOS ranger helmet icon">
-</p>
+# The Elder Scrolls V: Skyrim (32-bit LE) for macOS (Apple Silicon)
 
-# Fallout: New Vegas for iOS
+A native Apple Silicon (`arm64`) macOS port of **The Elder Scrolls V: Skyrim** (32-bit DirectX 9 "Oldrim", build `1.9.32.0.8`) using **x86-to-C/ARM64 static recompilation** and direct **Direct3D 9 → Apple Metal** translation, packaged as a standalone `Skyrim.app` bundle with no Wine, CrossOver, Rosetta 2, or virtual machines required.
 
-**A touch optimized port of Fallout: New Vegas that runs locally on your iPhone.**
+> **Status:** Active porting effort adapted from the Fallout: New Vegas macOS static recompiler architecture.
 
-Explore the Mojave using your own PC copy of the game, with controls designed for
-the touchscreen: floating movement, swipe aiming, dedicated combat buttons,
-optional gyro aiming, and layouts you can customize in the app.
+---
 
-This is an unofficial, experimental port. The original game runs through a native
-ARM64 runtime with Metal graphics, alongside an iOS interface for touch controls.
+## Requirements & Supported Executable
 
-**[Download a test release](https://github.com/arjuk95-dot/FNV-iOS-Shim/releases)**
-· **[Installation guide](docs/INSTALL.md)**
-· **[Touch controls](docs/TOUCH-CONTROLS.md)**
+* **Apple Silicon Mac (`arm64`)** running **macOS 14 (Sonoma)** or later.
+* **Xcode Command Line Tools** (`xcode-select --install`) and **Homebrew**.
+* **Your own PC copy of *The Elder Scrolls V: Skyrim* (32-bit LE, patch 1.9.32.0.8):**
+  * Steam ships `TESV.exe` with SteamStub v2.1 DRM (`.bind` section). Because the static recompiler translates unencrypted x86 machine code ahead of time, `quick-install.sh` checks `TESV.exe` and, when SteamStub DRM is detected, automatically installs `mono` (via Homebrew if missing), downloads and SHA-256-verifies the official [Steamless](https://github.com/atom0s/Steamless) CLI release (`v3.1.0.5`), backs up the original file to `TESV.exe.og`, and strips the DRM with no interactive prompt (no DRM-free retail Oldrim release exists).
+  * **Original Steam `TESV.exe` (SteamStub v2.1 DRM):**
+    * SHA-256: `69362f77bc56bf17570a33106d020b6c67fd8f32a294b82f8b687b9cf71efc72`
+  * **Supported unpacked `TESV.exe` hashes (both reuse `symbols/skyrim/` without re-running Ghidra auto-analysis):**
+    * **Steamless CLI (`v3.1.0.5` + Mono):** `d97eb0cc0ceef0923d2234d42b382c0d033853356528b271bc043542b1f5e605`
+    * **Steamless GUI:** `124306c7ea4aa8c655e8d9b7b093ea30afa579e40ac0c56dee579a978f87899f`
 
-## Made for touch
+> **Dev note — why Steamless CLI and Steamless GUI produce different unpacked SHA-256s (and why symbols do not need regenerating):**
+> Byte-for-byte comparison between the Steamless CLI unpacked executable (`d97eb0cc...`) and the Steamless GUI unpacked executable (`124306c7...`) shows **only 4 bytes differ** across the entire 17,462,064-byte file (`0x27d`, `0x2a4`, `0x2a5`, `0x2cd`), corresponding to trailing characters in the 8-byte PE section-header name strings (`.data`/`.tls`/`.rsrc` null-padded by CLI vs `.dataa`/`.tlsaa`/`.rsrca` left by the GUI unpacker). All 6 PE section payloads (`.text`, `.rdata`, `.data`, `.tls`, `.rsrc`, `.reloc`), section virtual addresses/sizes, and the entry point (`0xb568a1`) are bit-for-bit identical, and `ApplyMetadataAndDump.java` produces a byte-for-byte identical 78,497-function P-code dump (`d5998638c887e0576791d0fd8cc6b70d913248d01238e124c3b77661073b676b`). `quick-install.sh` therefore accepts both hashes directly for `symbols/skyrim/`.
 
-- **Floating movement:** place your left thumb anywhere in the movement region;
-  lift it to stop and hide the stick.
-- **Classic swipe look:** the default restores the earlier 3× aiming response,
-  preserving the distance of fast swipes. Drag on Fire to adjust aim while shooting.
-- **Six core actions:** Fire, Aim, Interact, Jump, VATS and Pip-Boy stay within reach.
-- **Aim and gyro:** tap Aim to toggle gyro; hold it to enter ADS, then tap to exit
-  ADS without changing gyro. Slide from Aim onto Fire to aim and shoot. Adjust the
-  hold delay, shared look multiplier, aiming multiplier and per-axis gains.
-- **Optional gyro:** works both in and out of ADS, with calibration,
-  inversion and a wider sensitivity range. Gyro stays off in game menus.
-- **Utilities without clutter:** hold Pip-Boy for reload, crouch, weapon hotkeys,
-  holster/ready, camera view, gyro and More. Move actions between the wheel and More
-  in Customize Controls → Utilities; Change Ammo starts in More.
-- **Editable layouts:** move, resize, fade or hide controls; adjust the movement
-  and navigation regions; keep separate gameplay and Pip-Boy layouts.
-- **Controller fallback:** double-tap with three fingers to show a standard
-  XInput overlay for unusual menus. Repeat the gesture to return to normal.
+---
 
-Pip-Boy, dialogue, looting and VATS use contextual controls. Physical-controller
-input is retained alongside the touch interface. The [controls guide](docs/TOUCH-CONTROLS.md)
-explains the bindings, editor, map controls and recovery gesture.
+## Quick Install
 
-## What you need
+```sh
+./quick-install.sh "/path/to/Skyrim"
+```
 
-- **iOS 18 or later.** Current device validation is on the project owner's iPhone;
-  broader iPhone and iPad coverage is still being tested.
-- **A working LiveContainer installation** or another compatible personal signing
-  setup. The downloadable IPA is unsigned. Start with the
-  [official LiveContainer installation guide](https://livecontainer.github.io/docs/installation/).
-- **Your own matching PC installation of Fallout: New Vegas.** Release notes list
-  the supported executable identity. The game files and prepared movie files are
-  supplied separately from your installation.
-- Space for the full game, local movie files and saves. The tested game-content
-  installation occupies approximately 10 GB before extra mods.
+To also wrap the app in a drag-to-Applications `.dmg`:
 
-## Install and play
+```sh
+./quick-install.sh --dmg "/path/to/Skyrim"
+```
 
-1. Download the game IPA from a release and import it into LiveContainer.
-2. Launch once to create the game's folders.
-3. Copy your matching executable, Data folder and configuration files into
-   `Documents/FalloutNV` inside **FNVGame's own data container**. The installation
-   guide shows the layout and the movie-file preparation step.
-4. Relaunch FNVGame, load a save or start New Game, and use the touch overlay to play.
+The finished app is installed at `~/Applications/Skyrim.app`.
 
-**Updating an existing installation:** update the existing FNVGame entry and keep
-its data container. Your game files, saves and settings stay there; they do not
-need to be copied again. Back up your saves before updating.
+To build a standalone app without the Steam launcher, Overlay hook or
+`libsteam_api.dylib` (offline mode):
 
-## Current progress
+```sh
+./quick-install.sh --no-steam "/path/to/Skyrim"
+```
 
-The following have been exercised on the owner's iPhone:
+* User data (`Skyrim.ini`, `SkyrimPrefs.ini`, saves, and `LocalAppData/Skyrim/plugins.txt`) is stored in `~/Library/Application Support/Skyrim/UserDocuments`.
+* Logs are written to `~/Library/Logs/Skyrim/skyrim.log`.
+* Translation and object caches are stored in `~/Library/Caches/skyrim-macos/`.
 
-- Doc Mitchell's introduction, including the Vigor Tester and couch sequence,
-  followed by gameplay in Goodsprings.
-- Dialogue, music, effects, menu sounds, gunfire and intro movie picture/audio.
-- Interior/exterior scene changes, saving, loading and reloading after a cold launch.
-- Character cast shadows and actor self-shadowing with the documented settings.
+---
 
-Classic swipe/gyro refinements, the app icon and Pip-Boy navigation changes are
-being delivered through test releases. Each release states its native-check results
-and remaining phone-test steps. Controller/minigame coverage, performance across
-devices, extended sessions and mod combinations remain active development areas.
+## Steam integration, Overlay & achievements
 
-## Controls at a glance
+Skyrim is a Steam-only PC release, so the default build bundles the Steam
+bridge:
 
-| Action | Touch input |
-| --- | --- |
-| Move | Floating left stick |
-| Look | Swipe the open right region; Fire also supports drag-to-look |
-| Aim / block | Aim button; toggle and hold modes are available |
-| Fire / attack | Hold Fire |
-| Interact / jump | Dedicated buttons |
-| Open Pip-Boy | Tap Pip-Boy |
-| Utilities | Hold Pip-Boy, then slide and release on a sector |
-| Edit controls | Utilities → More → Customize Controls |
-| Recover the editor | Hold four fingers for 1.2 seconds |
+* `quick-install.sh` downloads Valve's official **ARM64/universal
+  `libsteam_api.dylib`** from Steamworks.NET 20.1.0 (SHA-256 verified), caches
+  it under `~/Library/Caches/skyrim-macos/steamworks/20.1.0/`, and passes it to
+  `tools/build.py --steam-api-dylib ... --steam-appid 72850`.
+* The built bundle contains `Contents/Frameworks/libsteam_api.dylib`,
+  `Contents/MacOS/steam_appid.txt` (`72850`) and a `SkyrimLauncher` executable.
+  `SkyrimLauncher` is the bundle's `CFBundleExecutable`.
+* On launch, `SkyrimLauncher` starts the Mac Steam client silently (`-silent`)
+  if needed, waits for the Steam global user IPC/login, sets `SteamAppId`,
+  `SteamGameId` and `SteamOverlayGameId`, injects Valve's
+  `gameoverlayrenderer.dylib` for the Metal Steam Overlay (`Shift+Tab` and
+  achievement notifications), then `execv`s the `Skyrim` shim binary.
+* `upstream/recomp/host/shims_steam.c` bridges the `steam_api.dll` imports used
+  by `TESV.exe` (`SteamAPI_Init`, `SteamAPI_RunCallbacks`,
+  `SteamAPI_RegisterCallback`, `SteamAPI_UnregisterCallback`,
+  `SteamUserStats`), including achievement get/set/clear and store-stats
+  proxies, with a clean offline fallback when the dylib or Steam client is
+  unavailable.
+* Runtime overrides: `SKYRIM_STEAM_DISABLE=1` disables the Steam bridge;
+  `SKYRIM_STEAM_NO_OVERLAY=1` starts Steam without injecting the Overlay.
+  Build-time: `--no-steam` omits all of the above.
 
-Local utility wheels and the editor leave the game running. Use the game menu when
-you need to pause.
+> The Steam client must be installed and logged in. The app is ad-hoc signed;
+> launching it does not require Steam to own the Windows `TESV.exe` — the
+> translation uses your own unpacked copy, while Steam provides the Overlay,
+> status and achievements.
 
-## If something goes wrong
+---
 
-Keep the current run open and copy `Documents/fnv.log` from FNVGame's data container
-before launching again. Include the build number, device/iOS version, loaded save
-or location, what happened and the shortest sequence that reproduces it.
+## Anti-aliasing, render scale & display
 
-For missing files, executable mismatch, movie setup and shadow settings, see the
-[installation guide](docs/INSTALL.md). For tuning or layout issues, see
-[touch controls](docs/TOUCH-CONTROLS.md).
+The launcher (`SkyrimSkipLauncher`/Options window) exposes:
 
-## Development and credits
+* **Upscaler:** `MetalFX Spatial` or `Bilinear`.
+* **Anti-Aliasing:** `Off`, `SMAA (Post-Process)` or `FXAA (Fast,
+  Post-Process)` (FXAA is applied at the internal render resolution before the
+  MetalFX/bilinear upscale).
+* **Render Scale:** 50–100 % (internal resolution; the output is the physical
+  panel).
+* **Shadow Quality / Fullscreen / Mouse acceleration** options.
 
-Build instructions and test entry points are in [DEVELOPMENT.md](docs/DEVELOPMENT.md).
-Use the source tag attached to a release when reproducing that build.
+Environment overrides for automation and troubleshooting:
 
-This project builds on [Fallout-NV-MacOS](https://github.com/thetheoryofR/Fallout-NV-MacOS)
-and its public host/recompiler work. The original host's license is retained in
-[upstream/LICENSE](upstream/LICENSE); Ogg/Vorbis notices are included in the IPA.
-Fallout: New Vegas and its original content belong to their respective owners.
+* `SKYRIM_RENDER_SCALE=50..100`
+* `SKYRIM_UPSCALER=metalfx|bilinear`
+* `SKYRIM_AA=off|smaa|fxaa`
+* `SKYRIM_SHADOWS=keep|low|medium|high`
+* `SKYRIM_MOUSE_ACCEL=0|1`
+* `SKYRIM_OUTPUT_WIDTH`/`SKYRIM_OUTPUT_HEIGHT` — force the output resolution
+  instead of the detected physical panel.
+* `SKYRIM_SKIP_LAUNCHER=1` — bypass the Options window.
+
+The app detects the **physical panel pixel size** (for example 2560×1600 on a
+MacBook Air M1) even when macOS is using a scaled HiDPI desktop mode, and
+renders/upscales to that output instead of the scaled backing resolution. This
+avoids paying for 2880×1800 when the panel is 2560×1600. If detection is not
+desired, set the output overrides above.
+
+---
+
+## Manual Build & Tests
+
+```sh
+# Compile host-only check (no game files required)
+python3 tools/build.py host-check
+
+# Build standalone Metal/input probe app
+python3 tools/build.py probe --out build/probe-test
+
+# Run native host/media test suite
+bash tests/run.sh
+```
+
+---
+
+## Credits
+
+* **[Fallout-NV-MacOS](https://github.com/thetheoryofR/Fallout-NV-MacOS)** (by **thetheoryofR**) — Original x86→C/ARM64 static recompiler, D3D9→Metal renderer, Win32/COM host, and Unicorn fallback (MIT license in `upstream/LICENSE`).
+* **[FNV-iOS-Shim](https://github.com/arjuk95-dot/FNV-iOS-Shim)** (by **arjuk95-dot**) — Native audio mixer (`AVAudioEngine`), Ogg/Vorbis bridge, `AVFoundation` video, DirectShow pull-source, and heap/texture/sync fixes.
+* **[macIV](https://github.com/tanmayisdumb/macIV)** — App bundle packaging and `quick-install.sh` UX inspiration.

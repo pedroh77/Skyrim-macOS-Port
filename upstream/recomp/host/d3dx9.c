@@ -9,6 +9,8 @@ uint32_t d3d9_create_texture(uint32_t dev, int cube, uint32_t w, uint32_t h, uin
 uint32_t d3d9_texture_level_data(uint32_t tex, uint32_t face, uint32_t level, uint32_t *pitch, uint32_t *size);
 void d3d9_texture_dirty(uint32_t tex);
 void d3d9_texture_check(uint32_t tex,uint32_t caller,const char *stage);
+int d3d9_surface_load(uint32_t s, const uint8_t *src, uint32_t src_pitch, uint32_t w, uint32_t h);
+void host_path(const char *win, char *out, size_t n);
 
 static float *M(uint32_t a) { return (float *)(void *)(MEM + a); }
 static float FARG(CPU *c, int i) { uint32_t b = ARG(c, i); float f; memcpy(&f, &b, 4); return f; }
@@ -126,13 +128,14 @@ static void D3DXGetShaderConstantTable_(CPU *c) { P32(ARG(c, 1), 0); RET(c, E_FA
 // ---- DDS ---------------------------------------------------------------------------------------
 typedef struct { uint32_t w, h, depth, mips, fmt, cube, volume, data_off; } DDSInfo;
 #define FCC(a, b, c_, d) ((uint32_t)(a) | ((uint32_t)(b) << 8) | ((uint32_t)(c_) << 16) | ((uint32_t)(d) << 24))
-static int dds_parse(uint32_t p, uint32_t n, DDSInfo *o) {
-    if (n < 128 || G32(p) != FCC('D', 'D', 'S', ' ')) return 0;
-    uint32_t h = p + 4;
-    o->h = G32(h + 8); o->w = G32(h + 12); o->depth = G32(h + 20); o->mips = G32(h + 24) ? G32(h + 24) : 1;
-    uint32_t pf = h + 72, pff = G32(pf + 4), fourcc = G32(pf + 8), bits = G32(pf + 12);
-    uint32_t rm = G32(pf + 16), gm = G32(pf + 20), bm = G32(pf + 24), am = G32(pf + 28);
-    uint32_t caps2 = G32(h + 108);
+static uint32_t rd32b(const uint8_t *p) { uint32_t v; memcpy(&v, p, 4); return v; }
+static int dds_parse_bytes(const uint8_t *b, uint32_t n, DDSInfo *o) {
+    if (n < 128 || rd32b(b) != FCC('D', 'D', 'S', ' ')) return 0;
+    const uint8_t *h = b + 4;
+    o->h = rd32b(h + 8); o->w = rd32b(h + 12); o->depth = rd32b(h + 20); o->mips = rd32b(h + 24) ? rd32b(h + 24) : 1;
+    const uint8_t *pf = h + 72; uint32_t pff = rd32b(pf + 4), fourcc = rd32b(pf + 8), bits = rd32b(pf + 12);
+    uint32_t rm = rd32b(pf + 16), gm = rd32b(pf + 20), am = rd32b(pf + 28);
+    uint32_t caps2 = rd32b(h + 108);
     o->cube = (caps2 & 0x200) != 0; o->volume = (caps2 & 0x200000) != 0;
     o->data_off = 128;
     if (pff & 4) o->fmt = fourcc;                               // DDPF_FOURCC (DXTn, ATIn, or a D3DFMT value)
@@ -141,35 +144,73 @@ static int dds_parse(uint32_t p, uint32_t n, DDSInfo *o) {
     else if (bits == 16) o->fmt = (pff & 0x20000) ? 51 : gm == 0x7E0 ? 23 : am == 0x8000 ? 25 : am == 0xF000 ? 26 : 24;
     else if (bits == 8) o->fmt = (pff & 0x20000) ? 50 : 28;
     else return 0;
-    (void)bm;
     return 1;
+}
+static void fill_image_info(uint32_t info, const DDSInfo *d) {
+    P32(info, d->w); P32(info + 4, d->h); P32(info + 8, d->depth ? d->depth : 1); P32(info + 12, d->mips);
+    P32(info + 16, d->fmt); P32(info + 20, d->cube ? 5 : d->volume ? 4 : 3); P32(info + 24, 4 /* D3DXIFF_DDS */);
 }
 static void D3DXGetImageInfoFromFileInMemory_(CPU *c) {
     DDSInfo d; uint32_t info = ARG(c, 2);
-    if (!dds_parse(ARG(c, 0), ARG(c, 1), &d)) { RET(c, D3DXERR_INVALIDDATA, 3); return; }
-    P32(info, d.w); P32(info + 4, d.h); P32(info + 8, d.depth ? d.depth : 1); P32(info + 12, d.mips); P32(info + 16, d.fmt);
-    P32(info + 20, d.cube ? 5 : d.volume ? 4 : 3); P32(info + 24, 4 /* D3DXIFF_DDS */);
+    if (!dds_parse_bytes(MEM + ARG(c, 0), ARG(c, 1), &d)) { RET(c, D3DXERR_INVALIDDATA, 3); return; }
+    fill_image_info(info, &d);
     RET(c, 0, 3);
 }
-static uint32_t dds_load(uint32_t dev, uint32_t src, uint32_t n, int want_cube,uint32_t caller) {
+static uint8_t *read_host_file(const char *win, uint32_t *out_sz) {
+    char p[1024]; host_path(win, p, sizeof p);
+    FILE *f = fopen(p, "rb");
+    if (!f) return NULL;
+    fseek(f, 0, SEEK_END); long sz = ftell(f); fseek(f, 0, SEEK_SET);
+    if (sz <= 0 || sz > 256 * 1024 * 1024) { fclose(f); return NULL; }
+    uint8_t *buf = malloc((size_t)sz);
+    if (!buf || fread(buf, 1, (size_t)sz, f) != (size_t)sz) { free(buf); fclose(f); return NULL; }
+    fclose(f);
+    *out_sz = (uint32_t)sz;
+    return buf;
+}
+static void D3DXGetImageInfoFromFileA_(CPU *c) {
+    uint32_t sz = 0; uint8_t *buf = read_host_file(GSTR(ARG(c, 0)), &sz);
+    if (!buf) { RET(c, D3DXERR_INVALIDDATA, 2); return; }
+    DDSInfo d; int ok = dds_parse_bytes(buf, sz, &d);
+    free(buf);
+    if (!ok) { RET(c, D3DXERR_INVALIDDATA, 2); return; }
+    if (ARG(c, 1)) fill_image_info(ARG(c, 1), &d);
+    RET(c, 0, 2);
+}
+static uint32_t dds_load_bytes(uint32_t dev, const uint8_t *b, uint32_t n, int want_cube, uint32_t caller, DDSInfo *out_info) {
     DDSInfo d;
-    if (!dds_parse(src, n, &d)) return 0;
+    if (!dds_parse_bytes(b, n, &d)) return 0;
+    if (out_info) *out_info = d;
     uint32_t faces = want_cube && d.cube ? 6 : 1;
     uint32_t tex = d3d9_create_texture(dev, faces == 6, d.w, d.h, d.mips, 0, d.fmt, 1 /* MANAGED */);
     static unsigned seen;unsigned sample=__atomic_fetch_add(&seen,1,__ATOMIC_RELAXED);
-    if(sample<64||(sample<4096&&sample%512==0))fprintf(stderr,"[dds-diag] caller=%#x tex=%#x src=%#x bytes=%u w=%u h=%u levels=%u fmt=%#x faces=%u\n",caller,tex,src,n,d.w,d.h,d.mips,d.fmt,faces);
-    uint32_t off = src + d.data_off, end = src + n;
+    if(sample<64||(sample<4096&&sample%512==0))fprintf(stderr,"[dds-diag] caller=%#x tex=%#x bytes=%u w=%u h=%u levels=%u fmt=%#x faces=%u\n",caller,tex,n,d.w,d.h,d.mips,d.fmt,faces);
+    uint32_t off = d.data_off;
     for (uint32_t f = 0; f < faces; f++)
         for (uint32_t l = 0; l < d.mips; l++) {
             uint32_t pitch, size, dst = d3d9_texture_level_data(tex, f, l, &pitch, &size);
             if (!dst) continue;
-            uint32_t take = off + size <= end ? size : (off < end ? end - off : 0);
-            memcpy(MEM + dst, MEM + off, take);
+            uint32_t take = off + size <= n ? size : (off < n ? n - off : 0);
+            memcpy(MEM + dst, b + off, take);
             d3d9_texture_check(tex,caller,"dds-after-copy");
             off += size;
         }
     d3d9_texture_dirty(tex);
     return tex;
+}
+static uint32_t dds_load(uint32_t dev, uint32_t src, uint32_t n, int want_cube, uint32_t caller) {
+    return dds_load_bytes(dev, MEM + src, n, want_cube, caller, NULL);
+}
+static void D3DXCreateTextureFromFileExA_(CPU *c) {
+    uint32_t sz = 0; uint8_t *buf = read_host_file(GSTR(ARG(c, 1)), &sz);
+    if (!buf) { RET(c, D3DXERR_INVALIDDATA, 14); return; }
+    DDSInfo d;
+    uint32_t t = dds_load_bytes(ARG(c, 0), buf, sz, 0, G32(REG(c, R_ESP)), &d);
+    free(buf);
+    if (!t) { RET(c, D3DXERR_INVALIDDATA, 14); return; }
+    if (ARG(c, 11)) fill_image_info(ARG(c, 11), &d);
+    P32(ARG(c, 13), t);
+    RET(c, 0, 14);
 }
 static void D3DXCreateTextureFromFileInMemory_(CPU *c) {
     uint32_t t = dds_load(ARG(c, 0), ARG(c, 1), ARG(c, 2), 0,G32(REG(c,R_ESP)));
@@ -186,6 +227,13 @@ static void D3DXCreateVolumeTextureFromFileInMemory_(CPU *c) {
     if (!t) { RET(c, D3DXERR_INVALIDDATA, 4); return; }
     P32(ARG(c, 3), t); RET(c, 0, 4);
 }
+static void D3DXLoadSurfaceFromMemory_(CPU *c) {
+    uint32_t surf = ARG(c, 0), src = ARG(c, 3), pitch = ARG(c, 5), srcrect = ARG(c, 7);
+    uint32_t w = 0, h = 0;
+    if (srcrect) { w = G32(srcrect + 8) - G32(srcrect); h = G32(srcrect + 12) - G32(srcrect + 4); }
+    int ok = src ? d3d9_surface_load(surf, MEM + src, pitch, w, h) : 0;
+    RET(c, ok ? 0 : D3DXERR_INVALIDDATA, 10);
+}
 static void D3DXLoadSurfaceFromSurface_(CPU *c) { RET(c, 0, 8); }    // TODO(M3): blit through the backend
 static void D3DXSaveTextureToFileA_(CPU *c) { fprintf(stderr, "[d3dx] SaveTextureToFile(%s) ignored\n", GSTR(ARG(c, 0))); RET(c, 0, 4); }
 
@@ -196,6 +244,7 @@ const ShimTable d3dx_shims = { (const Shim[]){
     S(D3DXVec3Normalize) S(D3DXPlaneTransform) S(D3DXPlaneNormalize) S(D3DXCreateBuffer) S(D3DXGetVertexShaderProfile)
     S(D3DXGetPixelShaderProfile) S(D3DXCompileShader) S(D3DXCompileShaderFromFileA) S(D3DXAssembleShader)
     S(D3DXAssembleShaderFromFileA) S(D3DXGetShaderConstantTable) S(D3DXGetImageInfoFromFileInMemory)
+    S(D3DXGetImageInfoFromFileA) S(D3DXCreateTextureFromFileExA) S(D3DXLoadSurfaceFromMemory)
     S(D3DXCreateTextureFromFileInMemory) S(D3DXCreateCubeTextureFromFileInMemory)
     S(D3DXCreateVolumeTextureFromFileInMemory) S(D3DXLoadSurfaceFromSurface) S(D3DXSaveTextureToFileA)
-}, 25 };
+}, 28 };

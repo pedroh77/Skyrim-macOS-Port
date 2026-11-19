@@ -97,7 +97,7 @@ static uint32_t bump(uint32_t n) {
         int moved=0;
         for(unsigned i=0;i<fixed_count;i++)if(p<fixed_ranges[i].hi&&fixed_ranges[i].lo<p+n){
             fprintf(stderr,"[address-map] heap skips reserved %#x..%#x request=%u\n",fixed_ranges[i].lo,fixed_ranges[i].hi,n);
-            p=((uint64_t)fixed_ranges[i].hi+4095)&~4095ull;moved=1;break;
+            p=((uint64_t)fixed_ranges[i].hi+0xFFFFull)&~0xFFFFull;moved=1;break;
         }
         if(!moved)break;
     }
@@ -167,7 +167,7 @@ static uint32_t grealloc_u(uint32_t q, uint32_t size) {
 }
 
 static uint32_t gpages_u(uint32_t size) {
-    brk_ = (brk_ + 0xFFF) & ~0xFFFu;
+    brk_ = (brk_ + 0xFFFFu) & ~0xFFFFu;
     uint32_t p = bump((size + 0xFFF) & ~0xFFFu);
     st_bump_pages += (size + 0xFFF) & ~0xFFFu;
     memset(MEM + p, 0, size);

@@ -234,7 +234,10 @@ static const Ov surf_ov[] = {
 // fields: 0 width, 1 height/edge, 2 levels, 3 format, 4 usage, 5 pool, 6 surfaces array ptr (levels*faces)
 enum { T_W, T_H, T_LEVELS, T_FMT, T_USAGE, T_POOL, T_SURFS, T_FACES, T_LOD, T_DIRTY, T_HOST, T_NF };
 void d3d9_texture_check(uint32_t tex,uint32_t caller,const char *stage);
+extern D3DState g_d3d;
 static uint32_t new_texture(uint32_t dev, int kind, uint32_t w, uint32_t h, uint32_t levels, uint32_t usage, uint32_t fmt, uint32_t pool) {
+    if (!w) w = g_d3d.width ? g_d3d.width : 1;
+    if (!h) h = g_d3d.height ? g_d3d.height : 1;
     uint32_t faces = kind == K_CUBE ? 6 : 1;
     if (!levels) { levels = 1; uint32_t m = w > h ? w : h; while (m > 1) { m >>= 1; levels++; } }
     if (usage & 0x400) levels = 1;              // D3DUSAGE_AUTOGENMIPMAP exposes one level
@@ -533,7 +536,16 @@ static void Dev_SetTransform(CPU *c) { uint32_t s = ARG(c, 1); if (s < 512) memc
 static void Dev_GetTransform(CPU *c) { uint32_t s = ARG(c, 1); if (s < 512) memcpy(MEM + ARG(c, 2), g_d3d.transform[s], 64); RET(c, 0, 3); }
 static void Dev_SetViewport(CPU *c) { memcpy(g_d3d.viewport, MEM + ARG(c, 1), 24); RET(c, 0, 2); }
 static void Dev_GetViewport(CPU *c) { memcpy(MEM + ARG(c, 1), g_d3d.viewport, 24); RET(c, 0, 2); }
-static void Dev_SetRenderState(CPU *c) { uint32_t s = ARG(c, 1); if (s < 256) g_d3d.rs[s] = ARG(c, 2); RET(c, 0, 3); }
+static void Dev_SetRenderState(CPU *c) {
+    uint32_t s = ARG(c, 1), v = ARG(c, 2);
+    if (s < 256) g_d3d.rs[s] = v;
+    if (s == 154 && v == 0x7fa05000u && g_d3d.ds && g_d3d.tex[0]) {
+        uint32_t k = OBJ_KIND(g_d3d.tex[0]);
+        uint32_t dst = k == K_TEX ? tex_surf(g_d3d.tex[0], 0, 0) : k == K_SURF ? g_d3d.tex[0] : 0;
+        if (dst) d3d_backend_stretch(&g_d3d, g_d3d.ds, 0, dst, 0, 0);
+    }
+    RET(c, 0, 3);
+}
 static void Dev_GetRenderState(CPU *c) { uint32_t s = ARG(c, 1); P32(ARG(c, 2), s < 256 ? g_d3d.rs[s] : 0); RET(c, 0, 3); }
 static void Dev_CreateStateBlock(CPU *c) { P32(ARG(c, 2), newobj(vt_sb, K_SB, COM_THIS(c), 1)); RET(c, 0, 3); }
 static void Dev_EndStateBlock(CPU *c) { P32(ARG(c, 1), newobj(vt_sb, K_SB, COM_THIS(c), 1)); RET(c, 0, 2); }
@@ -720,7 +732,7 @@ static void D3D_GetAdapterIdentifier(CPU *c) {
     strcpy((char *)MEM + p + 512, fnv_display_adapter_description()); // Description[512]
     strcpy((char *)MEM + p + 1024, "\\\\.\\DISPLAY1");         // DeviceName[32]
     P32(p + 1056, 0x0008000F); P32(p + 1060, 0x000D0C4A);     // DriverVersion (8.17.12.6658)
-    P32(p + 1064, 0x10DE); P32(p + 1068, 0x1080); P32(p + 1072, 0); P32(p + 1076, 0xA1);   // vendor, device, subsys, rev
+    P32(p + 1064, 0x1002); P32(p + 1068, 0x6798); P32(p + 1072, 0); P32(p + 1076, 0);   // vendor, device, subsys, rev
     P32(p + 1080, 0xD7B71E3E); P32(p + 1084, 0x11CF5AE6); P32(p + 1088, 0x0B0A8160); P32(p + 1092, 0x35C2C9A0); // DeviceIdentifier
     P32(p + 1096, 1);                                         // WHQLLevel
     RET(c, 0, 4);
@@ -840,4 +852,23 @@ void d3d9_texture_dirty(uint32_t tex) {
     d3d9_texture_check(tex,0,"dirty-before");
     for (uint32_t f = 0; f < G32(OBJ_F(tex, T_FACES)); f++)
         for (uint32_t l = 0; l < G32(OBJ_F(tex, T_LEVELS)); l++) { surf_unpin(tex_surf(tex, f, l)); d3d_backend_dirty(tex_surf(tex, f, l)); }
+}
+int d3d9_surface_load(uint32_t s, const uint8_t *src, uint32_t src_pitch, uint32_t w, uint32_t h) {
+    if (!s || OBJ_KIND(s) != K_SURF || !src) return 0;
+    uint32_t dst_w = G32(OBJ_F(s, S_W)), dst_h = G32(OBJ_F(s, S_H)), fmt = G32(OBJ_F(s, S_FMT));
+    uint32_t dst_pitch = 0, dst_sz = 0;
+    level_layout(fmt, dst_w, dst_h, &dst_pitch, &dst_sz);
+    uint32_t d = surf_pin(s);
+    if (!d) return 0;
+    int blk = d3d_fmt_block(fmt);
+    uint32_t rows = blk ? ((h ? h : dst_h) + 3) / 4 : (h ? h : dst_h);
+    uint32_t dst_rows = blk ? (dst_h + 3) / 4 : dst_h;
+    if (rows > dst_rows) rows = dst_rows;
+    uint32_t row_bytes = src_pitch < dst_pitch ? src_pitch : dst_pitch;
+    (void)w;
+    for (uint32_t r = 0; r < rows; r++)
+        memcpy(MEM + d + (size_t)r * dst_pitch, src + (size_t)r * src_pitch, row_bytes);
+    surf_unpin(s);
+    d3d_backend_dirty(s);
+    return 1;
 }

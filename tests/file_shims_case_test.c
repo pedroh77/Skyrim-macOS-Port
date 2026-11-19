@@ -24,14 +24,14 @@ static int failed;
 static void check(const char *name,int good){printf("%s: %s\n",good?"PASS":"FAIL",name);failed+=!good;}
 int main(int argc,char **argv){
     if(argc!=2||chdir(argv[1]))return 2;setenv("FNV_ROOT",argv[1],1);MEM=calloc(1,1<<20);
-    uint32_t a[]={str("data\\fallout - misc.bsa"),0x80000000,0,0,3,0,0};
+    uint32_t a[]={str("data\\skyrim - misc.bsa"),0x80000000,0,0,3,0,0};
     uint32_t h=call("CreateFileA",a,7);check("CreateFileA mixed directory and basename",h!=0xffffffffu);
     if(h!=0xffffffffu){uint32_t r[]={h,0x30000,6,0x31000,0};check("ReadFile original content",call("ReadFile",r,5)&&G32(0x31000)==6&&!memcmp(MEM+0x30000,"marker",6));handle_close(h);}
-    uint32_t at[]={str("DATA\\FALLOUT - MISC.BSA")};check("GetFileAttributesA case aliases",call("GetFileAttributesA",at,1)!=0xffffffffu);
-    uint32_t ini[]={str("archive"),str("sarchivelist"),str("missing"),0x32000,256,str("c:\\games\\falloutnv\\userdocuments\\my games\\falloutnv\\Fallout.ini")};
+    uint32_t at[]={str("DATA\\SKYRIM - MISC.BSA")};check("GetFileAttributesA case aliases",call("GetFileAttributesA",at,1)!=0xffffffffu);
+    uint32_t ini[]={str("archive"),str("sresourcearchivelist"),str("missing"),0x32000,256,str("c:\\games\\skyrim\\userdocuments\\my games\\skyrim\\Skyrim.ini")};
     call("GetPrivateProfileStringA",ini,6);check("INI drive path, component and key case",!strcmp((char *)MEM+0x32000,"example.bsa"));
     uint32_t find[]={str("dAtA\\*.BSA"),0x33000};uint32_t fh=call("FindFirstFileA",find,2);check("FindFirstFileA mixed parent and pattern",fh!=0xffffffffu);if(fh!=0xffffffffu){uint32_t cl[]={fh};call("FindClose",cl,1);}
-    uint32_t w[]={wide("C:\\Games\\FALLOUTNV\\DATA\\New.txt"),0x40000000,0,0,2,0,0};h=call("CreateFileW",w,7);check("CreateFileW resolves existing parents for new files",h!=0xffffffffu);if(h!=0xffffffffu)handle_close(h);
+    uint32_t w[]={wide("C:\\Games\\SKYRIM\\DATA\\New.txt"),0x40000000,0,0,2,0,0};h=call("CreateFileW",w,7);check("CreateFileW resolves existing parents for new files",h!=0xffffffffu);if(h!=0xffffffffu)handle_close(h);
     uint32_t reopen[]={str("data\\NEW.TXT"),0x80000000,0,0,3,0,0};h=call("CreateFileA",reopen,7);check("Reopen new file with alternate case",h!=0xffffffffu);if(h!=0xffffffffu)handle_close(h);
     char path[1024];host_path("DATA\\not-present.bin",path,sizeof path);check("Missing leaf remains missing",access(path,F_OK)!=0);
     free(MEM);return failed?1:0;

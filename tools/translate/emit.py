@@ -363,9 +363,12 @@ class FnEmitter:
         if opc == "FLOAT2FLOAT":
             return self.wr(out, fp(fg(ins[0])))
         if opc == "TRUNC":
-            return self.wr(out, f"FTRUNC(trunc({fg(ins[0])}),{n})" if n > 8 else f"FTRUNCV(trunc({fg(ins[0])}),{n})")
+            mn = insn["m"].split()[0].upper()
+            v = fg(ins[0])
+            rfn = f"MXRND(R,{v})" if mn in ("CVTPS2DQ", "CVTPD2DQ", "CVTSS2SI", "CVTSD2SI") else f"trunc({v})"
+            return self.wr(out, f"FTRUNC({rfn},{n})" if n > 8 else f"FTRUNCV({rfn},{n})")
         if opc == "ROUND":
-            return self.wr(out, fp(f"nearbyint({fg(ins[0])})"))
+            return self.wr(out, fp(f"MXRND(R,{fg(ins[0])})"))
         if opc == "FLOAT_CEIL":
             return self.wr(out, fp(f"ceil({fg(ins[0])})"))
         if opc == "FLOAT_FLOOR":
@@ -374,7 +377,8 @@ class FnEmitter:
             tgt = ins[0]
             cond = self.rd(ins[1]) if opc == "CBRANCH" else None
             if tgt[0] == "const":
-                rel = tgt[1] if tgt[1] < (1 << 63) else tgt[1] - (1 << 64)
+                bits = tgt[2] * 8
+                rel = tgt[1] if tgt[1] < (1 << (bits - 1)) else tgt[1] - (1 << bits)
                 lab = self.plabel(a, idx + rel, len(insn["ops"]))
             else:
                 if tgt[1] not in self.addrs:
@@ -439,7 +443,7 @@ class FnEmitter:
             return put(f"(double)SXV({self.rd(ins[0])},{n0})" if n0 <= 8 else f"(double)SX({self.rdU(ins[0])},{n0})")
         if opc == "FLOAT2FLOAT": return put(fg(ins[0]))
         if opc == "TRUNC": return self.wr(out, f"FTRUNC(trunc({fg(ins[0])}),{n})" if n > 8 else f"FTRUNCV(trunc({fg(ins[0])}),{n})")
-        if opc == "ROUND": return put(f"nearbyint({fg(ins[0])})")
+        if opc == "ROUND": return put(f"FRND(R,{fg(ins[0])})")
         if opc == "FLOAT_CEIL": return put(f"ceil({fg(ins[0])})")
         if opc == "FLOAT_FLOOR": return put(f"floor({fg(ins[0])})")
         raise Unsupported(f"float op {opc}")
@@ -554,7 +558,7 @@ class FnEmitter:
             if any(v and v[0] == "register" and v[1] <= FPUSW < v[1] + v[2] for o in insn["ops"] for v in o[2]):
                 body.append("  SYNC_FPUSW(R);")
             if mn in X87_RESET:
-                body.append("  R[REG_TOP]=0;")
+                body.append("  R[REG_TOP]=0;STV(R+4256,0x037fu,2);")
             d = top_delta(insn["m"])
             if d:
                 body.append(f"  TOPADJ(R,{d});")
@@ -641,6 +645,47 @@ class FnEmitter:
         return name, out
 
 
+def sanitize_fn(fn):
+    """Drop bogus pointer-slot BRANCHIND targets (e.g. JMP [mem] listing &mem as a flow
+    target) and any non-code disassembly reachable only through them."""
+    insns = fn["insns"]
+    by_a = {i["a"]: i for i in insns}
+    slot_roots = set()
+    for i in insns:
+        for opc, _, ins in i["ops"]:
+            if opc == "BRANCHIND" and ins[0][0] == "ram" and i.get("targets"):
+                ptr = ins[0][1]
+                if ptr in i["targets"]:
+                    i["targets"] = [t for t in i["targets"] if t != ptr]
+                    if ptr in by_a:
+                        slot_roots.add(ptr)
+    if not slot_roots:
+        return fn
+    roots = [fn["entry"]] + FnEmitter.extras.get(fn["entry"], [])
+    seen = set()
+    work = [r for r in roots if r in by_a]
+    while work:
+        a = work.pop()
+        if a in seen:
+            continue
+        seen.add(a)
+        i = by_a[a]
+        for opc, _, ins in i["ops"]:
+            if opc in ("BRANCH", "CBRANCH") and ins[0][0] == "ram" and ins[0][1] in by_a:
+                work.append(ins[0][1])
+            elif opc == "BRANCHIND":
+                for t in i.get("targets") or ():
+                    if t in by_a:
+                        work.append(t)
+        last = i["ops"][-1][0] if i["ops"] else None
+        nxt = a + i["len"]
+        if last not in ("BRANCH", "RETURN", "BRANCHIND") and nxt in by_a:
+            work.append(nxt)
+    if len(seen) < len(insns):
+        fn["insns"] = [i for i in insns if i["a"] in seen]
+    return fn
+
+
 def write_if_changed(path, text):
     """Keep mtimes stable for unchanged translation units so build.sh can skip them."""
     if os.path.exists(path):
@@ -667,6 +712,7 @@ def main():
     if os.path.exists(up):
         FnEmitter.userops = json.load(open(up))
     FnEmitter.entries = {json.loads(l)["entry"] for l in open(args.inp)}
+    primary_entries = set(FnEmitter.entries)
     if args.extra:
         FnEmitter.extras = {int(k): v for k, v in json.load(open(args.extra)).items()}
     # Pass 1: a jump that leaves its function and lands *inside* another one (e.g. the code after
@@ -676,7 +722,7 @@ def main():
     jump_targets = set()
     summaries = {}
     for line in open(args.inp):
-        fn = json.loads(line)
+        fn = sanitize_fn(json.loads(line))
         summaries[fn["entry"]] = flaglive.summarize(fn)
         mine = {i["a"] for i in fn["insns"]}
         for i in fn["insns"]:
@@ -692,7 +738,7 @@ def main():
     added = 0
     for t in out_jumps:
         f = owner.get(t)
-        if f is not None and t != f and t not in FnEmitter.extras.get(f, []):
+        if f is not None and t != f and t not in primary_entries and t not in FnEmitter.extras.get(f, []):
             FnEmitter.extras.setdefault(f, []).append(t)
             added += 1
     del owner
@@ -703,9 +749,15 @@ def main():
     print(f"flag liveness: {sum(1 for v in FnEmitter.consumers.values() if v)} consumers, "
           f"{sum(1 for v in FnEmitter.producers.values() if v)} producers, {len(FnEmitter.reload)} reload sites", file=sys.stderr)
     print(f"pass 1: {len(out_jumps)} cross-function jumps, {added} new extra entries", file=sys.stderr)
-    for v in FnEmitter.extras.values():
-        v.sort()
-        FnEmitter.entries.update(v)
+    claimed_entries = set(primary_entries)
+    for k in sorted(FnEmitter.extras):
+        deduped = []
+        for x in sorted(set(FnEmitter.extras[k])):
+            if x not in claimed_entries:
+                claimed_entries.add(x)
+                deduped.append(x)
+        FnEmitter.extras[k] = deduped
+        FnEmitter.entries.update(deduped)
 
     ok, skipped, why = [], [], Counter()
     tu, tu_idx, chunk = [], 0, []
@@ -723,7 +775,7 @@ def main():
         chunk, refs = [], set()
 
     for line in open(args.inp):
-        fn = json.loads(line)
+        fn = sanitize_fn(json.loads(line))
         try:
             em = FnEmitter(fn)
             name, code = em.emit()

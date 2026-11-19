@@ -16,7 +16,7 @@ __attribute__((weak)) void rt_fallback(CPU *c, uint32_t a) { rt_trap(c, TRAP_NOF
 
 // O(1) dispatch: one 32-bit slot per byte of the code range holds (function index + 1).
 #define DISP_LO 0x00400000u
-#define DISP_HI 0x01000000u
+#define DISP_HI 0x01080000u
 static uint32_t *disp;
 static void disp_build(void) {
     uint32_t *t = calloc(DISP_HI - DISP_LO, sizeof *t);

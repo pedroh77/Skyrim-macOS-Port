@@ -329,21 +329,31 @@ static void emit_tex(Ctx *c, const Insn *x) {
     c->samplers |= 1u << s;
     int depth = (c->depth_mask >> s) & 1;
     const char *crd = dim == 2 ? "xy" : "xyz";
-    if (x->op == OP_TEX && (x->ctrl & 1)) {          // texldp: projective
-        if (depth) snprintf(res, sizeof res, "float4(t%d.sample_compare(sc%d, (%s).xy / (%s).w, (%s).z / (%s).w))", s, s, co, co, co, co);
-        else snprintf(res, sizeof res, "t%d.sample(s%d, (%s).%s / (%s).w)", s, s, co, crd, co);
+    if (depth) {
+        if (x->op == OP_TEX && (x->ctrl & 1)) {
+            snprintf(res, sizeof res, "float4(t%d.sample(s%d, (%s).xy / ((%s).w != 0.0f ? (%s).w : 1.0f)))", s, s, co, co, co);
+        } else if (x->op == OP_TEX && (x->ctrl & 2)) {
+            snprintf(res, sizeof res, "float4(t%d.sample(s%d, (%s).xy, bias((%s).w)))", s, s, co, co);
+        } else if (x->op == OP_TEXLDL) {
+            snprintf(res, sizeof res, "float4(t%d.sample(s%d, (%s).xy, level((%s).w)))", s, s, co, co);
+        } else if (x->op == OP_TEXLDD) {
+            src_expr(c, dx, sizeof dx, &x->src[2]); src_expr(c, dy, sizeof dy, &x->src[3]);
+            snprintf(res, sizeof res, "float4(t%d.sample(s%d, (%s).xy, gradient2d((%s).xy, (%s).xy)))", s, s, co, dx, dy);
+        } else {
+            snprintf(res, sizeof res, "float4(t%d.sample(s%d, (%s).xy))", s, s, co);
+        }
+    } else if (x->op == OP_TEX && (x->ctrl & 1)) {          // texldp: projective
+        snprintf(res, sizeof res, "t%d.sample(s%d, (%s).%s / (%s).w)", s, s, co, crd, co);
     } else if (x->op == OP_TEX && (x->ctrl & 2)) {   // texldb: bias in .w
         snprintf(res, sizeof res, "t%d.sample(s%d, (%s).%s, bias((%s).w))", s, s, co, crd, co);
     } else if (x->op == OP_TEXLDL) {
-        if (depth) snprintf(res, sizeof res, "float4(t%d.sample_compare(sc%d, (%s).xy, (%s).z, level(0)))", s, s, co, co);
-        else snprintf(res, sizeof res, "t%d.sample(s%d, (%s).%s, level((%s).w))", s, s, co, crd, co);
+        snprintf(res, sizeof res, "t%d.sample(s%d, (%s).%s, level((%s).w))", s, s, co, crd, co);
     } else if (x->op == OP_TEXLDD) {
         src_expr(c, dx, sizeof dx, &x->src[2]); src_expr(c, dy, sizeof dy, &x->src[3]);
         snprintf(res, sizeof res, "t%d.sample(s%d, (%s).%s, %s((%s).%s, (%s).%s))", s, s, co, crd,
                  dim == 3 ? "gradientcube" : dim == 4 ? "gradient3d" : "gradient2d", dx, crd, dy, crd);
     } else {
-        if (depth) snprintf(res, sizeof res, "float4(t%d.sample_compare(sc%d, (%s).xy, (%s).z))", s, s, co, co);
-        else snprintf(res, sizeof res, "t%d.sample(s%d, (%s).%s)", s, s, co, crd);
+        snprintf(res, sizeof res, "t%d.sample(s%d, (%s).%s)", s, s, co, crd);
     }
     if (!c->is_ps && x->op != OP_TEXLDL) fail(c->o, "vertex texture fetch without lod");
     write_dst(c, &x->dst, res);
@@ -622,7 +632,7 @@ char *sm_translate(const uint32_t *tok, size_t n, SMInfo *info, const uint16_t *
             if (!used) continue;
             int dim = c.samp_dim[s] ? c.samp_dim[s] : 2;
             if ((c.depth_mask >> s) & 1)
-                emit(&o, ",\n  depth2d<float> t%d [[texture(%d)]], sampler s%d [[sampler(%d)]], sampler sc%d [[sampler(%d)]]", s, s, s, s, s, s + 16);
+                emit(&o, ",\n  depth2d<float> t%d [[texture(%d)]], sampler s%d [[sampler(%d)]]", s, s, s, s);
             else
                 emit(&o, ",\n  %s<float> t%d [[texture(%d)]], sampler s%d [[sampler(%d)]]", dim == 3 ? "texturecube" : dim == 4 ? "texture3d" : "texture2d", s, s, s, s);
         }

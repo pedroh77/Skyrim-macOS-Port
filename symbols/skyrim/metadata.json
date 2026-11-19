@@ -1,0 +1,7 @@
+{
+  "sha256": "124306c7ea4aa8c655e8d9b7b093ea30afa579e40ac0c56dee579a978f87899f",
+  "sha256_steamless_cli": "d97eb0cc0ceef0923d2234d42b382c0d033853356528b271bc043542b1f5e605",
+  "functions": 78497,
+  "jumptables": 1094,
+  "extra_parents": 6
+}

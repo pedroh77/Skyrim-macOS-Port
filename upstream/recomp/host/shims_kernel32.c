@@ -16,7 +16,7 @@ static uint32_t cmdline_a, cmdline_w;
 static uint32_t teb_main;
 
 void host_init_args(int argc, char **argv) {
-    char buf[4096] = "FalloutNV.exe";
+    char buf[4096] = "TESV.exe";
     for (int i = 1; i < argc; i++) { strncat(buf, " ", sizeof buf - strlen(buf) - 1); strncat(buf, argv[i], sizeof buf - strlen(buf) - 1); }
     (void)argc;
     // allocated lazily (heap needs MEM); stash in a static until first use
@@ -47,6 +47,7 @@ void host_thread_init(CPU *c, uint32_t stack_size) {
     P32(teb + 0x30, gpages(0x1000));           // PEB
     SETREG(c, 272, teb);                       // FS_OFFSET
     SETREG(c, R_ESP, stack + stack_size - 64);
+    { uint16_t fcw = 0x037Fu; uint32_t mxcsr = 0x1F80u; memcpy(c->r + 4256, &fcw, 2); memcpy(c->r + 4244, &mxcsr, 4); }
     if (!teb_main) teb_main = teb;
 }
 
@@ -73,8 +74,9 @@ SHIM(GetCommandLineW_) {
 // ---- modules: system DLLs get fake handles; GetProcAddress hands out dynamic import thunks ----
 #define MOD_BASE 0xFD000000u
 static const char *known_mods[] = {"kernel32", "user32", "gdi32", "advapi32", "shell32", "ole32",
-    "ntdll", "d3d9", "dinput8", "dsound", "xinput1_3", "winmm", "comctl32", "wsock32", "d3dx9_38",
-    "binkw32", "libvorbisfile", "steam_api", "shlwapi", "version", "mscoree", "msvcrt"};
+    "ntdll", "d3d9", "dinput8", "dsound", "xinput1_3", "xaudio2_6", "x3daudio1_7", "winmm", "comctl32",
+    "wsock32", "d3dx9_42", "d3dx9_38", "binkw32", "libvorbisfile", "steam_api", "atimgpud", "shlwapi",
+    "version", "mscoree", "msvcrt"};
 #define NMODS (sizeof known_mods / sizeof *known_mods)
 
 static uint32_t mod_handle(const char *name) {
@@ -84,7 +86,7 @@ static uint32_t mod_handle(const char *name) {
         low[n++] = (char)(*p >= 'A' && *p <= 'Z' ? *p + 32 : *p);
     low[n] = 0;
     char *dot = strstr(low, ".dll"); if (dot) *dot = 0;
-    if (!strcmp(low, "falloutnv")) return host_image_base;
+    if (!strcmp(low, "tesv") || !strcmp(low, "tesv.exe") || !strcmp(low, "skyrim")) return host_image_base;
     for (size_t i = 0; i < NMODS; i++) if (!strcmp(low, known_mods[i])) return MOD_BASE + 0x10000u * (uint32_t)i;
     return 0;
 }
@@ -125,7 +127,7 @@ SHIM(GetProcAddress_) {
 }
 SHIM(GetModuleFileNameA_) {
     uint32_t buf = ARG(c, 1), n = ARG(c, 2);
-    const char *name = "C:\\Games\\FalloutNV\\FalloutNV.exe";
+    const char *name = "C:\\Games\\Skyrim\\TESV.exe";
     uint32_t l = (uint32_t)strlen(name);
     if (l >= n) l = n - 1;
     memcpy(MEM + buf, name, l); MEM[buf + l] = 0;
@@ -136,11 +138,18 @@ SHIM(GetCurrentThread_) { RET(c, 0xFFFFFFFEu, 0); }
 SHIM(GetCurrentProcessId_) { RET(c, (uint32_t)getpid(), 0); }
 SHIM(GetCurrentThreadId_) { RET(c, G32(REG(c, 272) + 0x24) ? G32(REG(c, 272) + 0x24) : 1, 0); }
 SHIM(GetTickCount_) { RET(c, (uint32_t)(clock_gettime_nsec_np(CLOCK_UPTIME_RAW) / 1000000ull), 0); }
+static pthread_once_t qpc_once = PTHREAD_ONCE_INIT;
+static uint64_t qpc_t0_ns;
+static void qpc_init(void) { qpc_t0_ns = clock_gettime_nsec_np(CLOCK_UPTIME_RAW); }
 SHIM(QueryPerformanceCounter_) {
-    uint64_t t = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+    pthread_once(&qpc_once, qpc_init);
+    uint64_t now = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+    /* 10 MHz counter with a 60s startup bias avoids (QPC * 1e6) uint64 overflow after ~5.1h uptime
+       and keeps initial delta checks non-zero across all threads. */
+    uint64_t t = 600000000ull + (now - qpc_t0_ns) / 100ull;
     memcpy(MEM + ARG(c, 0), &t, 8); RET(c, 1, 1);
 }
-SHIM(QueryPerformanceFrequency_) { uint64_t f = 1000000000ull; memcpy(MEM + ARG(c, 0), &f, 8); RET(c, 1, 1); }
+SHIM(QueryPerformanceFrequency_) { uint64_t f = 10000000ull; memcpy(MEM + ARG(c, 0), &f, 8); RET(c, 1, 1); }
 SHIM(GetSystemTimeAsFileTime_) {
     struct timeval tv; gettimeofday(&tv, NULL);
     uint64_t ft = ((uint64_t)tv.tv_sec + 11644473600ull) * 10000000ull + (uint64_t)tv.tv_usec * 10;
@@ -198,15 +207,23 @@ static void VirtualAlloc_locked(CPU *c) {
     }
     RET(c, lo, 4);
 }
-SHIM(VirtualFree_) { RET(c, 1, 3); }
+SHIM(VirtualFree_) {
+    uint32_t a = ARG(c, 0), n = ARG(c, 1), type = ARG(c, 2);
+    if ((type & 0x4000) && a && n && (uint64_t)a + n <= 0x100000000ull) memset(MEM + a, 0, n);
+    RET(c, 1, 3);
+}
 SHIM(VirtualQuery_) { RET(c, 0, 3); }
 
-// TLS
+// TLS / FLS
 static uint32_t tls_next;
 SHIM(TlsAlloc_) { RET(c, tls_next < TLS_SLOTS ? tls_next++ : 0xFFFFFFFFu, 0); }
 SHIM(TlsFree_) { RET(c, 1, 1); }
 SHIM(TlsGetValue_) { uint32_t i = ARG(c, 0); last_error = 0; RET(c, G32(REG(c, 272) + 0xE10 + 4 * i), 1); }
 SHIM(TlsSetValue_) { uint32_t i = ARG(c, 0); P32(REG(c, 272) + 0xE10 + 4 * i, ARG(c, 1)); RET(c, 1, 2); }
+SHIM(FlsAlloc_) { (void)ARG(c, 0); RET(c, tls_next < TLS_SLOTS ? tls_next++ : 0xFFFFFFFFu, 1); }
+SHIM(FlsFree_) { RET(c, 1, 1); }
+SHIM(FlsGetValue_) { uint32_t i = ARG(c, 0); last_error = 0; RET(c, G32(REG(c, 272) + 0xE10 + 4 * i), 1); }
+SHIM(FlsSetValue_) { uint32_t i = ARG(c, 0); P32(REG(c, 272) + 0xE10 + 4 * i, ARG(c, 1)); RET(c, 1, 2); }
 
 // environment / code pages / startup info
 SHIM(GetEnvironmentStringsW_) { uint32_t p = gmalloc(4); RET(c, p, 0); }
@@ -224,6 +241,8 @@ SHIM(SetHandleCount_) { RET(c, ARG(c, 0), 1); }
 SHIM(SetUnhandledExceptionFilter_) { RET(c, 0, 1); }
 SHIM(UnhandledExceptionFilter_) { RET(c, 0, 1); }
 SHIM(SetConsoleCtrlHandler_) { RET(c, 1, 2); }
+SHIM(SetThreadAffinityMask_) { (void)ARG(c, 0); RET(c, 1, 2); }
+SHIM(IsBadWritePtr_) { uint32_t p = ARG(c, 0), sz = ARG(c, 1); RET(c, sz != 0 && p == 0, 2); }
 SHIM(OutputDebugStringA_) { fprintf(stderr, "[guest] %s", GSTR(ARG(c, 0))); RET(c, 0, 1); }
 SHIM(EncodePointer_) { RET(c, ARG(c, 0), 1); }
 SHIM(DecodePointer_) { RET(c, ARG(c, 0), 1); }
@@ -248,7 +267,7 @@ SHIM(ExitProcess_) {
     uint32_t sp = REG(c, R_ESP);
     for (int i = 0, shown = 0; i < 4096 && shown < 40; i++) {
         uint32_t v = G32(sp + 4 * (uint32_t)i);
-        if (v >= 0x401000 && v < 0xfdf000) { fprintf(stderr, "  [esp+%#x] %#x\n", 4 * i, v); shown++; }
+        if (v >= 0x401000 && v < 0x1080000) { fprintf(stderr, "  [esp+%#x] %#x\n", 4 * i, v); shown++; }
     }
     exit((int)ARG(c, 0));
 }
@@ -263,15 +282,17 @@ static const Shim kernel32[] = {
     E(QueryPerformanceFrequency) E(GetSystemTimeAsFileTime) E(IsProcessorFeaturePresent) E(IsDebuggerPresent)
     E(HeapCreate) E(GetProcessHeap) E(HeapDestroy) E(HeapAlloc) E(HeapFree) E(HeapReAlloc) E(HeapSize)
     E(VirtualAlloc) E(VirtualFree) E(VirtualQuery) E(TlsAlloc) E(TlsFree) E(TlsGetValue) E(TlsSetValue)
+    E(FlsAlloc) E(FlsFree) E(FlsGetValue) E(FlsSetValue)
     E(GetEnvironmentStringsW) E(GetEnvironmentStrings) E(FreeEnvironmentStringsW) E(FreeEnvironmentStringsA)
     E(GetACP) E(GetOEMCP) E(GetCPInfo) E(IsValidCodePage) E(GetStartupInfoA) E(GetStdHandle) E(GetFileType)
     E(SetHandleCount) E(SetUnhandledExceptionFilter) E(UnhandledExceptionFilter) E(SetConsoleCtrlHandler)
     E(OutputDebugStringA) E(Sleep) E(ExitProcess) E(EncodePointer) E(DecodePointer)
+    E(SetThreadAffinityMask) E(IsBadWritePtr)
 #undef E
 };
 
 typedef struct { const Shim *list; int count; } ShimTable;
-extern const ShimTable sync_shims, file_shims, text_shims, win_shims, dinput_shims, dsound_shims, d3d9_shims, d3dx_shims, xinput_shims, media_shims, mmio_shims;
+extern const ShimTable sync_shims, file_shims, text_shims, win_shims, steam_shims, dinput_shims, dsound_shims, d3d9_shims, d3dx_shims, xinput_shims, media_shims, mmio_shims, wsock_shims, xaudio_shims;
 ShimFn host_find_shim(const char *dll, const char *name) {
     // ordinal imports collide across DLLs: look them up as "<dll basename, lowercase>#<n>"
     char key[160];
@@ -284,7 +305,7 @@ ShimFn host_find_shim(const char *dll, const char *name) {
     }
     for (size_t i = 0; i < sizeof kernel32 / sizeof *kernel32; i++)
         if (!strcmp(kernel32[i].name, name)) return kernel32[i].fn;
-    const ShimTable *tabs[] = {&sync_shims, &file_shims, &text_shims, &win_shims, &dinput_shims, &dsound_shims, &d3d9_shims, &d3dx_shims, &xinput_shims, &media_shims, &mmio_shims};
+    const ShimTable *tabs[] = {&sync_shims, &file_shims, &text_shims, &win_shims, &steam_shims, &dinput_shims, &dsound_shims, &d3d9_shims, &d3dx_shims, &xinput_shims, &media_shims, &mmio_shims, &wsock_shims, &xaudio_shims};
     for (size_t t = 0; t < sizeof tabs / sizeof *tabs; t++)
         for (int i = 0; i < tabs[t]->count; i++)
             if (!strcmp(tabs[t]->list[i].name, name)) return tabs[t]->list[i].fn;

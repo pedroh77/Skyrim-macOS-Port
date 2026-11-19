@@ -33,9 +33,9 @@ def main():
         parser.error('Provide a complete --generated directory or use --host-check')
     sdk = subprocess.check_output(['xcrun', '--sdk', 'macosx', '--show-sdk-path'], text=True).strip()
     cc = subprocess.check_output(['xcrun', '--sdk', 'macosx', '--find', 'clang'], text=True).strip()
-    sources = [ROOT/'tools/startup/main.c', ROOT/'ios/FNVPad.c',ROOT/'ios/FNVDisplay.c',
-               ROOT/'ios/FNVAudioMixer.c',ROOT/'ios/FNVNativeMedia.m',ROOT/'ios/FNVNativeVideo.m', R/'rt_dispatch.c', H/'dshow.m']
-    sources += sorted(H.glob('*.c'))  # includes the null renderer; no UIKit or Metal window
+    sources = [ROOT/'tools/startup/main.c', ROOT/'macos/FNVPad.c',ROOT/'macos/FNVDisplay.c',
+               ROOT/'macos/FNVAudioMixer.c',ROOT/'macos/FNVNativeMedia.m',ROOT/'macos/FNVNativeVideo.m', R/'rt_dispatch.c', H/'dshow.m']
+    sources += [f for f in sorted(H.glob('*.c')) if f.name != 'fallback.c']  # includes the null renderer; no AppKit or Metal window
     if not args.host_check:
         sources += [args.generated/'table.c', args.generated/'stubs.c', *sorted(args.generated.glob('tu_*.c'))]
     args.out.mkdir(parents=True, exist_ok=True)
@@ -48,11 +48,11 @@ def main():
             old_manifest=json.loads((cache/'manifest.json').read_text())
     with tempfile.TemporaryDirectory(dir=args.out) as temp:
         tmp = Path(temp)
-        base = [cc, '-isysroot', sdk, '-O1', '-DRT_CALLTRACE', '-I', str(R), '-I', str(H), '-I', str(ROOT/'ios')]
+        base = [cc, '-isysroot', sdk, '-O1', '-DRT_CALLTRACE', '-I', str(R), '-I', str(H), '-I', str(ROOT/'macos')]
         if args.host_check:
             base.append('-DFNV_STARTUP_HOST_CHECK')
         signature=hashlib.sha256(json.dumps(base).encode()+subprocess.check_output([cc,'--version']))
-        for directory in [R,H,ROOT/'ios']:
+        for directory in [R,H,ROOT/'macos']:
             for header in sorted(directory.glob('*.h')):
                 signature.update(str(header.relative_to(ROOT)).encode()+header.read_bytes())
         config=signature.digest()

@@ -10,6 +10,7 @@
 //    target formats, blend state, sample count).
 #import "FNVSurface.h"
 #import <Metal/Metal.h>
+#import <MetalFX/MetalFX.h>
 #import <QuartzCore/CAMetalLayer.h>
 #import <ImageIO/ImageIO.h>
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
@@ -25,6 +26,12 @@
 #include "host.h"
 #include "sm2msl.h"
 #include "input.h"
+
+extern unsigned fnv_output_width(void);
+extern unsigned fnv_output_height(void);
+extern int fnv_display_refresh(void);
+extern int fnv_graphics_upscaler(void);
+extern int fnv_graphics_aa(void);
 
 // ---- guest object layout (mirrors d3d9.c) ---------------------------------------------------------
 #define OBJ_KIND(o) G32((o) + 8)
@@ -124,6 +131,7 @@ static Fmt fmt_map(uint32_t f) {
     Fmt r = {MTLPixelFormatInvalid, MTLTextureSwizzleChannelsMake(MTLTextureSwizzleRed, MTLTextureSwizzleGreen, MTLTextureSwizzleBlue, MTLTextureSwizzleAlpha), 0};
 #define SW(a, b, c_, d) do { r.sw = MTLTextureSwizzleChannelsMake(MTLTextureSwizzle##a, MTLTextureSwizzle##b, MTLTextureSwizzle##c_, MTLTextureSwizzle##d); r.has_sw = 1; } while (0)
     switch (f) {
+    case 20: r.pf = MTLPixelFormatBGRA8Unorm; SW(Red, Green, Blue, One); break;
     case 21: r.pf = MTLPixelFormatBGRA8Unorm; break;
     case 22: r.pf = MTLPixelFormatBGRA8Unorm; SW(Red, Green, Blue, One); break;
     case 32: r.pf = MTLPixelFormatRGBA8Unorm; break;
@@ -155,7 +163,7 @@ static Fmt fmt_map(uint32_t f) {
         else if (f == FCC('A', 'T', 'I', '1')) { r.pf = MTLPixelFormatBC4_RUnorm; SW(Red, Red, Red, One); }
         else if (f == FCC('A', 'T', 'I', '2')) { r.pf = MTLPixelFormatBC5_RGUnorm; SW(Green, Red, One, One); }   // ATI2 stores Y in the first block
         else if (f == FCC('I', 'N', 'T', 'Z')) r.pf = MTLPixelFormatDepth32Float_Stencil8;
-        else if (f == FCC('N', 'U', 'L', 'L')) r.pf = MTLPixelFormatInvalid;
+        else if (f == FCC('N', 'U', 'L', 'L')) r.pf = MTLPixelFormatBGRA8Unorm;
         else r.pf = MTLPixelFormatBGRA8Unorm;
     }
 #undef SW
@@ -194,8 +202,30 @@ static void upload_level(HTex *t, uint32_t surf, uint32_t face, uint32_t level) 
     int blk = d3d_fmt_block(t.fmt);
     uint32_t rows = blk ? (h + 3) / 4 : h;
     const uint8_t *bytes = d3d_surf_begin(surf);
-    if (bytes) [t.tex replaceRegion:MTLRegionMake2D(0, 0, w, h) mipmapLevel:level slice:face withBytes:bytes
-                       bytesPerRow:pitch bytesPerImage:pitch * rows];
+    if (bytes) {
+        if (t.fmt == 20) {
+            uint32_t dpitch = w * 4;
+            uint8_t *tmp = malloc((size_t)dpitch * h);
+            if (tmp) {
+                for (uint32_t y = 0; y < h; y++) {
+                    const uint8_t *sr = bytes + (size_t)y * pitch;
+                    uint8_t *dr = tmp + (size_t)y * dpitch;
+                    for (uint32_t x = 0; x < w; x++) {
+                        dr[x * 4 + 0] = sr[x * 3 + 0];
+                        dr[x * 4 + 1] = sr[x * 3 + 1];
+                        dr[x * 4 + 2] = sr[x * 3 + 2];
+                        dr[x * 4 + 3] = 255;
+                    }
+                }
+                [t.tex replaceRegion:MTLRegionMake2D(0, 0, w, h) mipmapLevel:level slice:face withBytes:tmp
+                         bytesPerRow:dpitch bytesPerImage:dpitch * h];
+                free(tmp);
+            }
+        } else {
+            [t.tex replaceRegion:MTLRegionMake2D(0, 0, w, h) mipmapLevel:level slice:face withBytes:bytes
+                     bytesPerRow:pitch bytesPerImage:pitch * rows];
+        }
+    }
     d3d_surf_end();
 }
 
@@ -395,8 +425,14 @@ static MTLVertexDescriptor *vertex_desc(D3DState *s, const SMInfo *vi, uint32_t 
     }
     for (int st = 0; st < 16; st++) if (*streams_used & (1u << st)) {
         vd.layouts[st].stride = s->stream_stride[st] ? s->stream_stride[st] : 4;
-        vd.layouts[st].stepFunction = MTLVertexStepFunctionPerVertex;
-        [key appendFormat:@"s%d:%u;", st, s->stream_stride[st]];
+        if (s->stream_freq[st] & 0x80000000u) {
+            uint32_t div = s->stream_freq[st] & 0x3FFFFFFFu;
+            vd.layouts[st].stepFunction = MTLVertexStepFunctionPerInstance;
+            vd.layouts[st].stepRate = div ? div : 1;
+        } else {
+            vd.layouts[st].stepFunction = MTLVertexStepFunctionPerVertex;
+        }
+        [key appendFormat:@"s%d:%u:%u;", st, s->stream_stride[st], s->stream_freq[st]];
     }
     return vd;
 }
@@ -522,7 +558,7 @@ static int prim_info(uint32_t prim, uint32_t count, MTLPrimitiveType *pt, uint32
 // Everything a pipeline depends on, compared with memcmp.
 typedef struct {
     uint32_t vs, ps, decl, depth_mask, fvf;
-    uint32_t stride[8];
+    uint32_t stride[8], inst_step[8];
     uint32_t rtfmt[4], rtwm[4], dsfmt, samples;
     uint32_t blend_en, src, dst, op, sep, srca, dsta, opa;
 } PipeKey;
@@ -599,7 +635,13 @@ static int setup_draw(D3DState *s) {
         uint32_t t = s->tex[i];
         if (t && OBJ_KIND(t) == K_TEX && is_depth_fmt(G32(OBJ_F(t, T_FMT)))) k.depth_mask |= 1u << i;
     }
-    for (int i = 0; i < 8; i++) k.stride[i] = s->stream_stride[i];
+    for (int i = 0; i < 8; i++) {
+        k.stride[i] = s->stream_stride[i];
+        if (s->stream_freq[i] & 0x80000000u) {
+            uint32_t div = s->stream_freq[i] & 0x3FFFFFFFu;
+            k.inst_step[i] = div ? div : 1;
+        }
+    }
     for (int i = 0; i < 4; i++) {
         NSUInteger lv, sl; id<MTLTexture> t = surf_target(s->rt[i], &lv, &sl);
         if (!t) continue;
@@ -742,7 +784,7 @@ static int setup_draw(D3DState *s) {
     ec_vbuf(ring[ring_idx], last_vs_off, 20);
     ec_vbytes(s->vsi, sizeof s->vsi, 21);
     ec_vbytes(s->vsb, sizeof s->vsb, 22);
-    float vsys[4] = {s->viewport[2] ? -1.0f / (float)s->viewport[2] : 0, s->viewport[3] ? 1.0f / (float)s->viewport[3] : 0, 0, 0};
+    float vsys[4] = {s->viewport[2] ? 1.0f / (float)s->viewport[2] : 0, s->viewport[3] ? -1.0f / (float)s->viewport[3] : 0, 0, 0};
     if(screen)for(unsigned i=0;i<4;i++)vsys[i]=(float)s->viewport[i];
     ec_vbytes(vsys, sizeof vsys, 23);
     ec_fbuf(ring[ring_idx], last_ps_off, 0);
@@ -761,18 +803,35 @@ static int setup_draw(D3DState *s) {
     _Static_assert(sizeof psys <= 256, "psys");
     ec_fbytes(&psys, sizeof psys, 3);
 
+    static id<MTLTexture> dummy_tex, dummy_dtex;
     for (int i = 0; i < 16; i++) {
         if (!(ps->info.samplers & (1u << i))) continue;
         __unsafe_unretained HTex *t = host_tex(s->tex[i]);
-        if (!t) continue;
-        id<MTLTexture> tv = (k.depth_mask >> i) & 1 ? t.tex : t.view;
+        id<MTLTexture> tv = nil;
+        if (t) {
+            tv = (k.depth_mask >> i) & 1 ? t.tex : t.view;
+        } else if ((k.depth_mask >> i) & 1) {
+            if (!dummy_dtex) {
+                MTLTextureDescriptor *dd = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatDepth32Float_Stencil8 width:1 height:1 mipmapped:NO];
+                dd.usage = MTLTextureUsageShaderRead | MTLTextureUsageRenderTarget;
+                dd.storageMode = MTLStorageModePrivate;
+                dummy_dtex = [dev newTextureWithDescriptor:dd];
+            }
+            tv = dummy_dtex;
+        } else {
+            if (!dummy_tex) {
+                MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm width:1 height:1 mipmapped:NO];
+                td.usage = MTLTextureUsageShaderRead;
+                td.storageMode = MTLStorageModeShared;
+                dummy_tex = [dev newTextureWithDescriptor:td];
+                uint32_t black = 0xFF000000u;
+                [dummy_tex replaceRegion:MTLRegionMake2D(0, 0, 1, 1) mipmapLevel:0 withBytes:&black bytesPerRow:4];
+            }
+            tv = dummy_tex;
+        }
         if (ec.ftex[i] != tv) { [enc setFragmentTexture:tv atIndex:i]; ec.ftex[i] = tv; }
         id<MTLSamplerState> sm = sampler(s, i, 0);
         if (ec.fsamp[i] != sm) { [enc setFragmentSamplerState:sm atIndex:i]; ec.fsamp[i] = sm; }
-        if ((k.depth_mask >> i) & 1) {
-            id<MTLSamplerState> sc2 = sampler(s, i, 1);
-            if (ec.fsamp[i + 16] != sc2) { [enc setFragmentSamplerState:sc2 atIndex:i + 16]; ec.fsamp[i + 16] = sc2; }
-        }
     }
     for (int i = 0; i < 4; i++) {
         if (!(vs->info.samplers & (1u << i))) continue;
@@ -804,13 +863,23 @@ static id<MTLBuffer> static_buf(uint32_t b) {
     return m;
 }
 
-static void bind_streams(D3DState *s, uint32_t streams, uint32_t first_vertex, uint32_t nverts) {
+static void bind_streams(D3DState *s, uint32_t streams, uint32_t first_vertex, uint32_t nverts, uint32_t inst_count) {
     for (int st = 0; st < 16; st++) {
         if (!(streams & (1u << st))) continue;
         uint32_t b = s->stream[st];
         if (!b) continue;
         uint32_t stride = s->stream_stride[st], len = G32(OBJ_F(b, B_LEN)), data = G32(OBJ_F(b, B_DATA));
-        uint32_t start = s->stream_off[st] + first_vertex * stride, n = nverts * stride + 64;
+        uint32_t start, n;
+        if (s->stream_freq[st] & 0x80000000u) {
+            uint32_t div = s->stream_freq[st] & 0x3FFFFFFFu;
+            uint32_t rate = div ? div : 1;
+            uint32_t ninst = (inst_count + rate - 1) / rate;
+            start = s->stream_off[st];
+            n = ninst * stride + 64;
+        } else {
+            start = s->stream_off[st] + first_vertex * stride;
+            n = nverts * stride + 64;
+        }
         if (start >= len) continue;
         if (start + n > len) n = len - start;
         __unsafe_unretained id<MTLBuffer> sb = (start & 3) ? nil : static_buf(b);
@@ -829,7 +898,7 @@ static void d3d_backend_draw_impl(D3DState *s, uint32_t prim, uint32_t start, ui
     int kind = prim_info(prim, count, &pt, &n);
     if (!kind) return;
     if (!indexed) {
-        bind_streams(s, (uint32_t)r & 0xFFFF, start, n);
+        bind_streams(s, (uint32_t)r & 0xFFFF, start, n, 1);
         if (kind == 2) {   // fan -> list indices
             uint16_t *ix = malloc(sizeof(uint16_t) * n);
             for (uint32_t i = 0; i < count; i++) { ix[3 * i] = 0; ix[3 * i + 1] = (uint16_t)(i + 1); ix[3 * i + 2] = (uint16_t)(i + 2); }
@@ -839,15 +908,17 @@ static void d3d_backend_draw_impl(D3DState *s, uint32_t prim, uint32_t start, ui
     } else {
         uint32_t ib = s->indices;
         if (!ib) return;
+        uint32_t inst_count = (s->stream_freq[0] & 0x40000000u) ? (s->stream_freq[0] & 0x3FFFFFFFu) : 1u;
+        if (!inst_count) return;
         int i32 = G32(OBJ_F(ib, B_FMT)) == 102;
         uint32_t isz = i32 ? 4 : 2, idata = G32(OBJ_F(ib, B_DATA));
         // vertices the indices can touch: [base+min, base+min+num_vertices)
-        bind_streams(s, (uint32_t)r & 0xFFFF, (uint32_t)(base_vertex + (int32_t)min_index), num_vertices);
+        bind_streams(s, (uint32_t)r & 0xFFFF, (uint32_t)(base_vertex + (int32_t)min_index), num_vertices, inst_count);
         if (kind == 2) return;   // indexed fans: not used by FNV
         __unsafe_unretained id<MTLBuffer> ibuf = ((start * isz) & 3) ? nil : static_buf(ib);
         uint32_t ioff = ibuf ? start * isz : ring_put(MEM + idata + start * isz, n * isz);
         [enc drawIndexedPrimitives:pt indexCount:n indexType:i32 ? MTLIndexTypeUInt32 : MTLIndexTypeUInt16 indexBuffer:ibuf ? ibuf : ring[ring_idx]
-                 indexBufferOffset:ioff instanceCount:1 baseVertex:-(NSInteger)min_index baseInstance:0];
+                 indexBufferOffset:ioff instanceCount:inst_count baseVertex:-(NSInteger)min_index baseInstance:0];
     }
     draws_done++;
 }
@@ -942,7 +1013,14 @@ static void d3d_backend_stretch_impl(D3DState *s, uint32_t src, uint32_t srect, 
     (void)s; (void)srect; (void)drect;
     NSUInteger sl, ss, dl, dsl;
     id<MTLTexture> a = surf_target(src, &sl, &ss), b = surf_target(dst, &dl, &dsl);
-    if (a && b && !(a.pixelFormat >= MTLPixelFormatDepth16Unorm && a.pixelFormat <= MTLPixelFormatX32_Stencil8)) blit(a, b, dl, dsl, filter >= 2);
+    if (!a || !b || a == b) return;
+    if (a.pixelFormat >= MTLPixelFormatDepth16Unorm && a.pixelFormat <= MTLPixelFormatX32_Stencil8) {
+        if (a.pixelFormat == b.pixelFormat && a.width == MAX(1u, b.width >> dl) &&
+            a.height == MAX(1u, b.height >> dl) && a.sampleCount == 1 && b.sampleCount == 1)
+            blit(a, b, dl, dsl, 0);
+        return;
+    }
+    blit(a, b, dl, dsl, filter >= 2);
 }
 static void d3d_backend_colorfill_impl(D3DState *s, uint32_t surf, uint32_t rect, uint32_t color) {
     (void)rect;
@@ -1026,7 +1104,10 @@ static void dump_png(id<MTLTexture> src, uint64_t frame) {
     CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
     CGContextRef ctx = CGBitmapContextCreate(px, w, h, 8, bpr, cs, kCGImageAlphaNoneSkipFirst | kCGBitmapByteOrder32Little);
     CGImageRef img = CGBitmapContextCreateImage(ctx);
-    char path[256]; snprintf(path, sizeof path, "frame_%llu.png", (unsigned long long)frame);
+    char path[512];
+    const char *dir = getenv("FNV_DUMP_DIR");
+    if (dir && dir[0]) snprintf(path, sizeof path, "%s/frame_%llu.png", dir, (unsigned long long)frame);
+    else snprintf(path, sizeof path, "frame_%llu.png", (unsigned long long)frame);
     CFURLRef url = CFURLCreateFromFileSystemRepresentation(NULL, (const UInt8 *)path, (CFIndex)strlen(path), false);
     CGImageDestinationRef dst = CGImageDestinationCreateWithURL(url, (__bridge CFStringRef)UTTypePNG.identifier, 1, NULL);
     CGImageDestinationAddImage(dst, img, NULL); CGImageDestinationFinalize(dst);
@@ -1110,33 +1191,425 @@ static void rec_frame(id<MTLTexture> src) {
     }];
 }
 
+// ---- post-process (SMAA 1x) & MetalFX Spatial upscaling -----------------------------------------------
+static id<MTLTexture> resolve_1x_tex;
+static id<MTLTexture> resolve_to_1x(id<MTLTexture> src) {
+    if (!src || src.sampleCount <= 1) return src;
+    if (!resolve_1x_tex || resolve_1x_tex.width != src.width || resolve_1x_tex.height != src.height) {
+        MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:src.pixelFormat width:src.width height:src.height mipmapped:NO];
+        d.storageMode = MTLStorageModePrivate;
+        d.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+        resolve_1x_tex = [dev newTextureWithDescriptor:d];
+    }
+    blit(src, resolve_1x_tex, 0, 0, 0);
+    return resolve_1x_tex;
+}
+
+static id<MTLRenderPipelineState> smaa_edge_pso, smaa_weight_pso, smaa_blend_pso;
+static id<MTLSamplerState> smaa_nearest_samp, smaa_linear_samp;
+static id<MTLTexture> smaa_edges, smaa_weights, smaa_out;
+static int smaa_init_failed;
+
+static int smaa_ensure_pipelines(void) {
+    if (smaa_init_failed) return 0;
+    if (smaa_edge_pso) return 1;
+    NSString *src =
+        @"#include <metal_stdlib>\nusing namespace metal;\n"
+        "struct SV { float4 p [[position]]; float2 uv; };\n"
+        "vertex SV smaa_vs(uint i [[vertex_id]]) {\n"
+        "  float2 q = float2((i << 1) & 2, i & 2);\n"
+        "  SV v; v.p = float4(q * 2.0 - 1.0, 0.0, 1.0); v.p.y = -v.p.y; v.uv = q; return v;\n"
+        "}\n"
+        "static inline float luma(float3 c) { return dot(c, float3(0.2126, 0.7152, 0.0722)); }\n"
+        "static inline float edge_delta(float3 a, float3 b) {\n"
+        "  float3 d = abs(a - b);\n"
+        "  return max(abs(luma(a) - luma(b)), 0.5 * max(d.r, max(d.g, d.b)));\n"
+        "}\n"
+        "fragment float2 smaa_edge_fs(SV v [[stage_in]], texture2d<float> col [[texture(0)]], sampler sN [[sampler(0)]]) {\n"
+        "  float2 px = 1.0 / float2(col.get_width(), col.get_height());\n"
+        "  float3 c = col.sample(sN, v.uv).rgb;\n"
+        "  float3 cL = col.sample(sN, v.uv + float2(-px.x, 0.0)).rgb;\n"
+        "  float3 cT = col.sample(sN, v.uv + float2(0.0, -px.y)).rgb;\n"
+        "  float dL = edge_delta(c, cL);\n"
+        "  float dT = edge_delta(c, cT);\n"
+        "  if (dL < 0.08 && dT < 0.08) return float2(0.0);\n"
+        "  float3 cR = col.sample(sN, v.uv + float2(px.x, 0.0)).rgb;\n"
+        "  float3 cB = col.sample(sN, v.uv + float2(0.0, px.y)).rgb;\n"
+        "  float3 cLL = col.sample(sN, v.uv + float2(-2.0 * px.x, 0.0)).rgb;\n"
+        "  float3 cTT = col.sample(sN, v.uv + float2(0.0, -2.0 * px.y)).rgb;\n"
+        "  float dR = edge_delta(c, cR), dB = edge_delta(c, cB);\n"
+        "  float dLL = edge_delta(cL, cLL), dTT = edge_delta(cT, cTT);\n"
+        "  float maxCross = max(max(dL, dR), max(dT, dB));\n"
+        "  float eH = (dT >= 0.08 && dT >= 0.5 * max(maxCross, dTT)) ? 1.0 : 0.0;\n"
+        "  float eV = (dL >= 0.08 && dL >= 0.5 * max(maxCross, dLL)) ? 1.0 : 0.0;\n"
+        "  return float2(eH, eV);\n"
+        "}\n"
+        "fragment float4 smaa_weight_fs(SV v [[stage_in]], texture2d<float> edges [[texture(0)]], sampler sN [[sampler(0)]]) {\n"
+        "  float2 px = 1.0 / float2(edges.get_width(), edges.get_height());\n"
+        "  float2 e = edges.sample(sN, v.uv).rg;\n"
+        "  float4 w = float4(0.0);\n"
+        "  if (e.r > 0.5) {\n"
+        "    float d1 = 0.0, d2 = 0.0;\n"
+        "    for (int k = 1; k < 16; k++) {\n"
+        "      if (edges.sample(sN, v.uv + float2(-float(k) * px.x, 0.0)).r <= 0.5) break;\n"
+        "      d1 += 1.0;\n"
+        "    }\n"
+        "    for (int k = 1; k < 16; k++) {\n"
+        "      if (edges.sample(sN, v.uv + float2(float(k) * px.x, 0.0)).r <= 0.5) break;\n"
+        "      d2 += 1.0;\n"
+        "    }\n"
+        "    float cTL = edges.sample(sN, v.uv + float2(-d1 * px.x, -px.y)).g;\n"
+        "    float cBL = edges.sample(sN, v.uv + float2(-d1 * px.x, 0.0)).g;\n"
+        "    float cTR = edges.sample(sN, v.uv + float2((d2 + 1.0) * px.x, -px.y)).g;\n"
+        "    float cBR = edges.sample(sN, v.uv + float2((d2 + 1.0) * px.x, 0.0)).g;\n"
+        "    float y1 = (cBL > 0.5 && cTL < 0.5) ? 0.5 : ((cTL > 0.5 && cBL < 0.5) ? -0.5 : 0.0);\n"
+        "    float y2 = (cBR > 0.5 && cTR < 0.5) ? 0.5 : ((cTR > 0.5 && cBR < 0.5) ? -0.5 : 0.0);\n"
+        "    float len = d1 + d2 + 1.0;\n"
+        "    float y = mix(y1, y2, (d1 + 0.5) / len);\n"
+        "    if (y1 * y2 > 0.0) y *= 0.25;\n"
+        "    w.r = max(y, 0.0); w.g = max(-y, 0.0);\n"
+        "  }\n"
+        "  if (e.g > 0.5) {\n"
+        "    float d1 = 0.0, d2 = 0.0;\n"
+        "    for (int k = 1; k < 16; k++) {\n"
+        "      if (edges.sample(sN, v.uv + float2(0.0, -float(k) * px.y)).g <= 0.5) break;\n"
+        "      d1 += 1.0;\n"
+        "    }\n"
+        "    for (int k = 1; k < 16; k++) {\n"
+        "      if (edges.sample(sN, v.uv + float2(0.0, float(k) * px.y)).g <= 0.5) break;\n"
+        "      d2 += 1.0;\n"
+        "    }\n"
+        "    float cLT = edges.sample(sN, v.uv + float2(-px.x, -d1 * px.y)).r;\n"
+        "    float cRT = edges.sample(sN, v.uv + float2(0.0, -d1 * px.y)).r;\n"
+        "    float cLB = edges.sample(sN, v.uv + float2(-px.x, (d2 + 1.0) * px.y)).r;\n"
+        "    float cRB = edges.sample(sN, v.uv + float2(0.0, (d2 + 1.0) * px.y)).r;\n"
+        "    float x1 = (cRT > 0.5 && cLT < 0.5) ? 0.5 : ((cLT > 0.5 && cRT < 0.5) ? -0.5 : 0.0);\n"
+        "    float x2 = (cRB > 0.5 && cLB < 0.5) ? 0.5 : ((cLB > 0.5 && cRB < 0.5) ? -0.5 : 0.0);\n"
+        "    float len = d1 + d2 + 1.0;\n"
+        "    float x = mix(x1, x2, (d1 + 0.5) / len);\n"
+        "    if (x1 * x2 > 0.0) x *= 0.25;\n"
+        "    w.b = max(x, 0.0); w.a = max(-x, 0.0);\n"
+        "  }\n"
+        "  return w;\n"
+        "}\n"
+        "fragment float4 smaa_blend_fs(SV v [[stage_in]], texture2d<float> col [[texture(0)]],\n"
+        "                              texture2d<float> weights [[texture(1)]],\n"
+        "                              sampler sN [[sampler(0)]], sampler sL [[sampler(1)]]) {\n"
+        "  float2 px = 1.0 / float2(col.get_width(), col.get_height());\n"
+        "  float2 w0 = weights.sample(sN, v.uv).rb;\n"
+        "  float wTop = w0.x, wLeft = w0.y;\n"
+        "  float wBot = weights.sample(sN, v.uv + float2(0.0, px.y)).g;\n"
+        "  float wRight = weights.sample(sN, v.uv + float2(px.x, 0.0)).a;\n"
+        "  float hMax = max(wTop, wBot), vMax = max(wLeft, wRight);\n"
+        "  if (hMax < 1e-5 && vMax < 1e-5) return col.sample(sN, v.uv);\n"
+        "  if (hMax > vMax) {\n"
+        "    float s = wTop + wBot;\n"
+        "    float4 c1 = col.sample(sL, v.uv + float2(0.0, -wTop * px.y));\n"
+        "    float4 c2 = col.sample(sL, v.uv + float2(0.0, wBot * px.y));\n"
+        "    return (c1 * wTop + c2 * wBot) / s;\n"
+        "  } else {\n"
+        "    float s = wLeft + wRight;\n"
+        "    float4 c1 = col.sample(sL, v.uv + float2(-wLeft * px.x, 0.0));\n"
+        "    float4 c2 = col.sample(sL, v.uv + float2(wRight * px.x, 0.0));\n"
+        "    return (c1 * wLeft + c2 * wRight) / s;\n"
+        "  }\n"
+        "}\n";
+    NSError *err = nil;
+    id<MTLLibrary> lib = [dev newLibraryWithSource:src options:copts error:&err];
+    if (!lib) {
+        fprintf(stderr, "[smaa] shader compile error: %s\n", err.localizedDescription.UTF8String);
+        smaa_init_failed = 1;
+        return 0;
+    }
+    id<MTLFunction> vs = [lib newFunctionWithName:@"smaa_vs"];
+    id<MTLFunction> fEdge = [lib newFunctionWithName:@"smaa_edge_fs"];
+    id<MTLFunction> fWeight = [lib newFunctionWithName:@"smaa_weight_fs"];
+    id<MTLFunction> fBlend = [lib newFunctionWithName:@"smaa_blend_fs"];
+
+    MTLRenderPipelineDescriptor *d = [MTLRenderPipelineDescriptor new];
+    d.vertexFunction = vs;
+    d.fragmentFunction = fEdge;
+    d.colorAttachments[0].pixelFormat = MTLPixelFormatRG8Unorm;
+    smaa_edge_pso = [dev newRenderPipelineStateWithDescriptor:d error:&err];
+    if (!smaa_edge_pso) {
+        fprintf(stderr, "[smaa] edge PSO error: %s\n", err.localizedDescription.UTF8String);
+        smaa_init_failed = 1;
+        return 0;
+    }
+    d.fragmentFunction = fWeight;
+    d.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
+    smaa_weight_pso = [dev newRenderPipelineStateWithDescriptor:d error:&err];
+    if (!smaa_weight_pso) {
+        fprintf(stderr, "[smaa] weight PSO error: %s\n", err.localizedDescription.UTF8String);
+        smaa_edge_pso = nil; smaa_init_failed = 1;
+        return 0;
+    }
+    d.fragmentFunction = fBlend;
+    d.colorAttachments[0].pixelFormat = MTLPixelFormatBGRA8Unorm;
+    smaa_blend_pso = [dev newRenderPipelineStateWithDescriptor:d error:&err];
+    if (!smaa_blend_pso) {
+        fprintf(stderr, "[smaa] blend PSO error: %s\n", err.localizedDescription.UTF8String);
+        smaa_edge_pso = nil; smaa_weight_pso = nil; smaa_init_failed = 1;
+        return 0;
+    }
+
+    MTLSamplerDescriptor *sd = [MTLSamplerDescriptor new];
+    sd.sAddressMode = MTLSamplerAddressModeClampToEdge;
+    sd.tAddressMode = MTLSamplerAddressModeClampToEdge;
+    sd.minFilter = sd.magFilter = MTLSamplerMinMagFilterNearest;
+    smaa_nearest_samp = [dev newSamplerStateWithDescriptor:sd];
+    sd.minFilter = sd.magFilter = MTLSamplerMinMagFilterLinear;
+    smaa_linear_samp = [dev newSamplerStateWithDescriptor:sd];
+    return 1;
+}
+
+static id<MTLTexture> smaa_make_rt(MTLPixelFormat pf, NSUInteger w, NSUInteger h) {
+    MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:pf width:w height:h mipmapped:NO];
+    td.storageMode = MTLStorageModePrivate;
+    td.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+    return [dev newTextureWithDescriptor:td];
+}
+
+static id<MTLTexture> run_smaa(id<MTLTexture> src) {
+    if (!src || src.pixelFormat != MTLPixelFormatBGRA8Unorm || !smaa_ensure_pipelines()) return src;
+    NSUInteger w = src.width, h = src.height;
+    if (!smaa_edges || smaa_edges.width != w || smaa_edges.height != h) {
+        smaa_edges = smaa_make_rt(MTLPixelFormatRG8Unorm, w, h);
+        smaa_weights = smaa_make_rt(MTLPixelFormatRGBA8Unorm, w, h);
+        smaa_out = smaa_make_rt(MTLPixelFormatBGRA8Unorm, w, h);
+    }
+    if (!smaa_edges || !smaa_weights || !smaa_out) return src;
+    end_pass(); ensure_cmd();
+
+    // Pass 1: Edge detection
+    MTLRenderPassDescriptor *rp1 = [MTLRenderPassDescriptor renderPassDescriptor];
+    rp1.colorAttachments[0].texture = smaa_edges;
+    rp1.colorAttachments[0].loadAction = MTLLoadActionDontCare;
+    rp1.colorAttachments[0].storeAction = MTLStoreActionStore;
+    id<MTLRenderCommandEncoder> e1 = [cmd renderCommandEncoderWithDescriptor:rp1];
+    [e1 setRenderPipelineState:smaa_edge_pso];
+    [e1 setFragmentTexture:src atIndex:0];
+    [e1 setFragmentSamplerState:smaa_nearest_samp atIndex:0];
+    [e1 drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+    [e1 endEncoding];
+
+    // Pass 2: Blending weights
+    MTLRenderPassDescriptor *rp2 = [MTLRenderPassDescriptor renderPassDescriptor];
+    rp2.colorAttachments[0].texture = smaa_weights;
+    rp2.colorAttachments[0].loadAction = MTLLoadActionDontCare;
+    rp2.colorAttachments[0].storeAction = MTLStoreActionStore;
+    id<MTLRenderCommandEncoder> e2 = [cmd renderCommandEncoderWithDescriptor:rp2];
+    [e2 setRenderPipelineState:smaa_weight_pso];
+    [e2 setFragmentTexture:smaa_edges atIndex:0];
+    [e2 setFragmentSamplerState:smaa_nearest_samp atIndex:0];
+    [e2 drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+    [e2 endEncoding];
+
+    // Pass 3: Neighborhood blending
+    MTLRenderPassDescriptor *rp3 = [MTLRenderPassDescriptor renderPassDescriptor];
+    rp3.colorAttachments[0].texture = smaa_out;
+    rp3.colorAttachments[0].loadAction = MTLLoadActionDontCare;
+    rp3.colorAttachments[0].storeAction = MTLStoreActionStore;
+    id<MTLRenderCommandEncoder> e3 = [cmd renderCommandEncoderWithDescriptor:rp3];
+    [e3 setRenderPipelineState:smaa_blend_pso];
+    [e3 setFragmentTexture:src atIndex:0];
+    [e3 setFragmentTexture:smaa_weights atIndex:1];
+    [e3 setFragmentSamplerState:smaa_nearest_samp atIndex:0];
+    [e3 setFragmentSamplerState:smaa_linear_samp atIndex:1];
+    [e3 drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+    [e3 endEncoding];
+
+    return smaa_out;
+}
+
+static id<MTLRenderPipelineState> fxaa_pso;
+static id<MTLSamplerState> fxaa_samp;
+static id<MTLTexture> fxaa_out;
+static int fxaa_init_failed;
+
+static int fxaa_ensure_pipelines(void) {
+    if (fxaa_init_failed) return 0;
+    if (fxaa_pso) return fxaa_samp != nil;
+    NSString *src =
+        @"#include <metal_stdlib>\nusing namespace metal;\n"
+        "struct SV { float4 p [[position]]; float2 uv; };\n"
+        "vertex SV fxaa_vs(uint i [[vertex_id]]) {\n"
+        "  float2 q = float2((i << 1) & 2, i & 2);\n"
+        "  SV v; v.p = float4(q * 2.0 - 1.0, 0.0, 1.0); v.p.y = -v.p.y; v.uv = q; return v;\n"
+        "}\n"
+        "static inline float fxaa_luma(float3 c) { return dot(c, float3(0.299, 0.587, 0.114)); }\n"
+        "fragment float4 fxaa_fs(SV v [[stage_in]], texture2d<float> tex [[texture(0)]], sampler s [[sampler(0)]]) {\n"
+        "  float2 rcp = 1.0 / float2(tex.get_width(), tex.get_height());\n"
+        "  float3 rgbM  = tex.sample(s, v.uv).rgb;\n"
+        "  float3 rgbNW = tex.sample(s, v.uv + float2(-1.0, -1.0) * rcp).rgb;\n"
+        "  float3 rgbNE = tex.sample(s, v.uv + float2( 1.0, -1.0) * rcp).rgb;\n"
+        "  float3 rgbSW = tex.sample(s, v.uv + float2(-1.0,  1.0) * rcp).rgb;\n"
+        "  float3 rgbSE = tex.sample(s, v.uv + float2( 1.0,  1.0) * rcp).rgb;\n"
+        "  float lM = fxaa_luma(rgbM), lNW = fxaa_luma(rgbNW), lNE = fxaa_luma(rgbNE);\n"
+        "  float lSW = fxaa_luma(rgbSW), lSE = fxaa_luma(rgbSE);\n"
+        "  float lMin = min(lM, min(min(lNW, lNE), min(lSW, lSE)));\n"
+        "  float lMax = max(lM, max(max(lNW, lNE), max(lSW, lSE)));\n"
+        "  if (lMax - lMin < max(0.0312, lMax * 0.125)) return float4(rgbM, 1.0);\n"
+        "  float2 dir = float2(-((lNW + lNE) - (lSW + lSE)), ((lNW + lSW) - (lNE + lSE)));\n"
+        "  float dirReduce = max((lNW + lNE + lSW + lSE) * (0.25 * (1.0 / 8.0)), 1.0 / 128.0);\n"
+        "  float rcpDirMin = 1.0 / (min(abs(dir.x), abs(dir.y)) + dirReduce);\n"
+        "  dir = clamp(dir * rcpDirMin, float2(-8.0), float2(8.0)) * rcp;\n"
+        "  float3 rgbA = 0.5 * (tex.sample(s, v.uv + dir * (1.0 / 3.0 - 0.5)).rgb +\n"
+        "                      tex.sample(s, v.uv + dir * (2.0 / 3.0 - 0.5)).rgb);\n"
+        "  float3 rgbB = rgbA * 0.5 + 0.25 * (tex.sample(s, v.uv + dir * -0.5).rgb +\n"
+        "                                     tex.sample(s, v.uv + dir *  0.5).rgb);\n"
+        "  float lB = fxaa_luma(rgbB);\n"
+        "  return float4((lB < lMin || lB > lMax) ? rgbA : rgbB, 1.0);\n"
+        "}\n";
+    NSError *err = nil;
+    id<MTLLibrary> lib = [dev newLibraryWithSource:src options:copts error:&err];
+    if (!lib) {
+        fprintf(stderr, "[fxaa] shader compile error: %s\n", err.localizedDescription.UTF8String);
+        fxaa_init_failed = 1;
+        return 0;
+    }
+    id<MTLFunction> vs = [lib newFunctionWithName:@"fxaa_vs"];
+    id<MTLFunction> fs = [lib newFunctionWithName:@"fxaa_fs"];
+    MTLRenderPipelineDescriptor *d = [MTLRenderPipelineDescriptor new];
+    d.vertexFunction = vs;
+    d.fragmentFunction = fs;
+    d.colorAttachments[0].pixelFormat = MTLPixelFormatBGRA8Unorm;
+    fxaa_pso = [dev newRenderPipelineStateWithDescriptor:d error:&err];
+    if (!fxaa_pso) {
+        fprintf(stderr, "[fxaa] pipeline error: %s\n", err.localizedDescription.UTF8String);
+        fxaa_init_failed = 1;
+        return 0;
+    }
+    MTLSamplerDescriptor *sd = [MTLSamplerDescriptor new];
+    sd.sAddressMode = MTLSamplerAddressModeClampToEdge;
+    sd.tAddressMode = MTLSamplerAddressModeClampToEdge;
+    sd.minFilter = sd.magFilter = MTLSamplerMinMagFilterLinear;
+    fxaa_samp = [dev newSamplerStateWithDescriptor:sd];
+    if (!fxaa_samp) { fxaa_pso = nil; fxaa_init_failed = 1; return 0; }
+    return 1;
+}
+
+static id<MTLTexture> run_fxaa(id<MTLTexture> src) {
+    if (!src || src.pixelFormat != MTLPixelFormatBGRA8Unorm || !fxaa_ensure_pipelines()) return src;
+    NSUInteger w = src.width, h = src.height;
+    if (!fxaa_out || fxaa_out.width != w || fxaa_out.height != h) {
+        MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm
+                                                                                      width:w height:h mipmapped:NO];
+        td.storageMode = MTLStorageModePrivate;
+        td.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+        fxaa_out = [dev newTextureWithDescriptor:td];
+    }
+    if (!fxaa_out) return src;
+    end_pass(); ensure_cmd();
+    MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
+    rp.colorAttachments[0].texture = fxaa_out;
+    rp.colorAttachments[0].loadAction = MTLLoadActionDontCare;
+    rp.colorAttachments[0].storeAction = MTLStoreActionStore;
+    id<MTLRenderCommandEncoder> e = [cmd renderCommandEncoderWithDescriptor:rp];
+    [e setRenderPipelineState:fxaa_pso];
+    [e setFragmentTexture:src atIndex:0];
+    [e setFragmentSamplerState:fxaa_samp atIndex:0];
+    [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+    [e endEncoding];
+    return fxaa_out;
+}
+
+static const char *aa_name(void) {
+    int aa = fnv_graphics_aa();
+    return aa == 1 ? "smaa" : (aa == 2 ? "fxaa" : "off");
+}
+
+static id<MTLFXSpatialScaler> mfx_scaler;
+static id<MTLTexture> mfx_out;
+// Headless bilinear parity: a windowed present scales the final texture into the
+// drawable; with no drawable (benchmarks/dumps) we scale it explicitly so both
+// upscalers pay for an output-resolution pass and dumps are output-sized.
+static id<MTLTexture> linear_out;
+static NSUInteger linear_out_w, linear_out_h;
+static NSUInteger mfx_in_w, mfx_in_h, mfx_out_w, mfx_out_h;
+static MTLPixelFormat mfx_in_fmt;
+
+static id<MTLTexture> run_metalfx_spatial(id<MTLTexture> src, NSUInteger outW, NSUInteger outH) {
+    if (!src || !outW || !outH) return nil;
+    if (![MTLFXSpatialScalerDescriptor supportsDevice:dev]) return nil;
+    if (!mfx_scaler || mfx_in_w != src.width || mfx_in_h != src.height ||
+        mfx_out_w != outW || mfx_out_h != outH || mfx_in_fmt != src.pixelFormat) {
+        MTLFXSpatialScalerDescriptor *desc = [MTLFXSpatialScalerDescriptor new];
+        desc.colorTextureFormat = src.pixelFormat;
+        desc.outputTextureFormat = MTLPixelFormatBGRA8Unorm;
+        desc.inputWidth = src.width;
+        desc.inputHeight = src.height;
+        desc.outputWidth = outW;
+        desc.outputHeight = outH;
+        desc.colorProcessingMode = MTLFXSpatialScalerColorProcessingModePerceptual;
+        mfx_scaler = [desc newSpatialScalerWithDevice:dev];
+        if (!mfx_scaler) {
+            fprintf(stderr, "[metalfx] failed to create spatial scaler (%lux%lu -> %lux%lu)\n",
+                    (unsigned long)src.width, (unsigned long)src.height, (unsigned long)outW, (unsigned long)outH);
+            return nil;
+        }
+        MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm
+                                                                                      width:outW height:outH mipmapped:NO];
+        td.storageMode = MTLStorageModePrivate;
+        td.usage = mfx_scaler.outputTextureUsage | MTLTextureUsageShaderRead;
+        mfx_out = [dev newTextureWithDescriptor:td];
+        if (!mfx_out) { mfx_scaler = nil; return nil; }
+        mfx_in_w = src.width; mfx_in_h = src.height;
+        mfx_out_w = outW; mfx_out_h = outH;
+        mfx_in_fmt = src.pixelFormat;
+        fprintf(stderr, "[metalfx] spatial scaler %lux%lu -> %lux%lu (AA=%s)\n",
+                (unsigned long)mfx_in_w, (unsigned long)mfx_in_h, (unsigned long)mfx_out_w, (unsigned long)mfx_out_h,
+                aa_name());
+    }
+    MTLTextureUsage req = mfx_scaler.colorTextureUsage;
+    if ((src.usage & req) != req) return nil;
+    end_pass(); ensure_cmd();
+    mfx_scaler.colorTexture = src;
+    mfx_scaler.inputContentWidth = src.width;
+    mfx_scaler.inputContentHeight = src.height;
+    mfx_scaler.outputTexture = mfx_out;
+    [mfx_scaler encodeToCommandBuffer:cmd];
+    return mfx_out;
+}
+
 void d3d_backend_init(D3DState *s) {
     trace_metal = getenv("FNV_TRACE_METAL") != NULL;
     dev = MTLCreateSystemDefaultDevice();
     queue = [dev newCommandQueue];
     copts = [MTLCompileOptions new];
-    copts.mathMode = MTLMathModeSafe;
+    if (@available(macOS 15.0, iOS 18.0, *)) {
+        copts.mathMode = MTLMathModeSafe;
+    }
 
     pipe_tab = calloc(PIPE_TAB, sizeof *pipe_tab); pipe_keep = [NSMutableArray array];
     samp_keep = [NSMutableArray array]; dss_keep = [NSMutableArray array];
     for (int i = 0; i < 3; i++) ring[i] = [dev newBufferWithLength:RING_SIZE options:MTLResourceStorageModeShared | MTLResourceCPUCacheModeWriteCombined];
     if (!dev || !queue || !ring[0] || !ring[1] || !ring[2]) {
-        fprintf(stderr, "[ios] Metal device, queue, or upload buffers unavailable\n");
+        fprintf(stderr, "[metal] Metal device, queue, or upload buffers unavailable\n");
         abort();
     }
     rec_init();
     inflight = dispatch_semaphore_create(3);
 
+    unsigned outW = fnv_output_width() ? fnv_output_width() : s->width;
+    unsigned outH = fnv_output_height() ? fnv_output_height() : s->height;
     if (getenv("FNV_HEADLESS")) {          // offscreen: real rendering, no window, no focus change
-        fprintf(stderr, "[metal] %s, offscreen %ux%u\n", dev.name.UTF8String, s->width, s->height);
+        fprintf(stderr, "[metal] %s, offscreen %ux%u -> %ux%u (upscaler=%s, aa=%s)\n",
+                dev.name.UTF8String, s->width, s->height, outW, outH,
+                fnv_graphics_upscaler() == 1 ? "metalfx" : "bilinear",
+                aa_name());
         dispatch_semaphore_wait(inflight, DISPATCH_TIME_FOREVER);
         return;
     }
-    layer = fnv_surface(dev, CGSizeMake(s->width, s->height));
-    if (!layer) { fprintf(stderr, "[ios] no Metal surface\n"); abort(); }
+    layer = fnv_surface(dev, CGSizeMake(outW, outH));
+    if (!layer) { fprintf(stderr, "[metal] no Metal surface\n"); abort(); }
     dispatch_semaphore_wait(inflight, DISPATCH_TIME_FOREVER);
 }
-static void d3d_backend_resize_impl(D3DState *s) { fnv_resize_surface(CGSizeMake(s->width, s->height)); }
+static void d3d_backend_resize_impl(D3DState *s) {
+    unsigned outW = fnv_output_width() ? fnv_output_width() : s->width;
+    unsigned outH = fnv_output_height() ? fnv_output_height() : s->height;
+    fnv_resize_surface(CGSizeMake(outW, outH));
+}
 
 void host_pump_events(void) { fnv_wait_active(); }
 
@@ -1150,10 +1623,38 @@ static void d3d_backend_present_impl(D3DState *s) {
         id<CAMetalDrawable> drawable = layer ? [layer nextDrawable] : nil;
         frame_perf.drawable_ns += clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - drawable_start;
         HTex *bb = host_tex(s->backbuffer);
-        if (bb && (want_dump(s->frames + 1) || input_take_dump_request())) dump_png(bb.tex, s->frames + 1);
-        if (drawable && bb) blit(bb.tex, drawable.texture, 0, 0, 1);
-        if (bb) rec_frame(bb.tex);
-        if (drawable) [cmd presentDrawable:drawable];
+        NSUInteger outW = drawable ? drawable.texture.width : (fnv_output_width() ? fnv_output_width() : s->width);
+        NSUInteger outH = drawable ? drawable.texture.height : (fnv_output_height() ? fnv_output_height() : s->height);
+        id<MTLTexture> final_tex = bb ? bb.tex : nil;
+        if (final_tex && final_tex.sampleCount > 1) final_tex = resolve_to_1x(final_tex);
+        if (final_tex && fnv_graphics_aa() == 1) final_tex = run_smaa(final_tex) ?: final_tex;
+        else if (final_tex && fnv_graphics_aa() == 2) final_tex = run_fxaa(final_tex) ?: final_tex;
+        if (final_tex && (final_tex.width != outW || final_tex.height != outH) && fnv_graphics_upscaler() == 1) {
+            id<MTLTexture> up = run_metalfx_spatial(final_tex, outW, outH);
+            if (up) final_tex = up;
+        }
+        if (!drawable && final_tex && fnv_graphics_upscaler() != 1 &&
+            (final_tex.width != outW || final_tex.height != outH)) {
+            if (!linear_out || linear_out_w != outW || linear_out_h != outH) {
+                MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm
+                                                                                              width:outW height:outH mipmapped:NO];
+                td.storageMode = MTLStorageModePrivate;
+                td.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+                linear_out = [dev newTextureWithDescriptor:td];
+                linear_out_w = outW; linear_out_h = outH;
+            }
+            if (linear_out) { blit(final_tex, linear_out, 0, 0, 1); final_tex = linear_out; }
+        }
+        if (final_tex && (want_dump(s->frames + 1) || input_take_dump_request())) dump_png(final_tex, s->frames + 1);
+        if (drawable && final_tex) blit(final_tex, drawable.texture, 0, 0, 1);
+        if (final_tex) rec_frame(final_tex);
+        if (drawable) {
+            if (!getenv("FNV_NOVSYNC") && fnv_display_refresh() > 62) {
+                [cmd presentDrawable:drawable afterMinimumDuration:1.0 / 60.5];
+            } else {
+                [cmd presentDrawable:drawable];
+            }
+        }
         dispatch_semaphore_t sem = inflight;
         [cmd addCompletedHandler:^(id<MTLCommandBuffer> b) { perf_gpu_completed(b); dispatch_semaphore_signal(sem); }];
         [cmd commit];
@@ -1193,5 +1694,31 @@ void d3d_backend_readback(D3DState *s, uint32_t a, uint32_t b) { LOCKED_BEGIN d3
 void d3d_backend_created(uint32_t o) { LOCKED_BEGIN d3d_backend_created_impl(o); LOCKED_END }
 void d3d_backend_dirty(uint32_t o) { LOCKED_BEGIN d3d_backend_dirty_impl(o); LOCKED_END }
 void d3d_backend_release(uint32_t o) { LOCKED_BEGIN d3d_backend_release_impl(o); LOCKED_END }
-void d3d_backend_present(D3DState *s) { LOCKED_BEGIN d3d_backend_present_impl(s); LOCKED_END host_pump_events(); }
+static void pace_60fps(void) {
+    static int novsync = -1;
+    if (novsync < 0) novsync = getenv("FNV_NOVSYNC") != NULL;
+    if (novsync) return;
+    static uint64_t prev_ns;
+    const uint64_t step_ns = 16666667ull; // 60 Hz ceiling keeps Skyrim Havok physics stable
+    uint64_t now = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+    if (!prev_ns) { prev_ns = now; return; }
+    uint64_t target = prev_ns + step_ns;
+    if (now < target) {
+        uint64_t rem = target - now;
+        if (rem > 1000000ull) {
+            struct timespec ts = { (time_t)((rem - 500000ull) / 1000000000ull), (long)((rem - 500000ull) % 1000000000ull) };
+            nanosleep(&ts, NULL);
+        }
+        while (clock_gettime_nsec_np(CLOCK_UPTIME_RAW) < target) {}
+        prev_ns = target;
+    } else {
+        prev_ns = now;
+    }
+}
+void d3d_backend_present(D3DState *s) {
+    LOCKED_BEGIN d3d_backend_present_impl(s); LOCKED_END
+    // Avoid software sleep fighting hardware VSync on 60 Hz panels; only pace when headless/non-vsync.
+    if (!layer || !layer.displaySyncEnabled) pace_60fps();
+    host_pump_events();
+}
 void d3d_backend_resize(D3DState *s) { LOCKED_BEGIN d3d_backend_resize_impl(s); LOCKED_END }

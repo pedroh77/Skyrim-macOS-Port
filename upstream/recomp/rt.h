@@ -94,6 +94,23 @@ static inline U FTRUNC(double d, int n) {
     if (!(d >= -lim && d < lim)) return ((U)1 << (8 * n - 1)) & MASK(n);
     return (U)(S)(int64_t)d & MASK(n);
 }
+// x87 FPUControlWord rounding control (bits 10..11 at R+4256) and SSE MXCSR (bits 13..14 at R+4244).
+static inline double FRND(const uint8_t *R, double d) {
+    switch ((R[4257] >> 2) & 3) {
+    case 0: return nearbyint(d);
+    case 1: return floor(d);
+    case 2: return ceil(d);
+    default: return trunc(d);
+    }
+}
+static inline double MXRND(const uint8_t *R, double d) {
+    switch ((R[4245] >> 5) & 3) {
+    case 0: return nearbyint(d);
+    case 1: return floor(d);
+    case 2: return ceil(d);
+    default: return trunc(d);
+    }
+}
 // x86 NaN propagation: a NaN operand is returned (quieted) instead of the host's default NaN;
 // the first operand wins when both are NaN (SSE rule).
 // A NaN *created* by an operation (inf-inf, 0*inf, ...) is x86's "real indefinite": negative quiet

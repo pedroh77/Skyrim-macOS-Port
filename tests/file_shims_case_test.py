@@ -12,9 +12,9 @@ with tempfile.TemporaryDirectory(prefix='fnv-file-test-') as temp:
     try:
         run('hdiutil','attach',image,'-mountpoint',mount,'-nobrowse');attached=True
         fixture=mount/'fixture';(fixture/'Data').mkdir(parents=True)
-        (fixture/'Data/Fallout - Misc.bsa').write_bytes(b'marker')
-        ini=fixture/'UserDocuments/My Games/FalloutNV/FALLOUT.INI';ini.parent.mkdir(parents=True)
-        ini.write_text('[Archive]\nSArchiveList=example.bsa\n')
+        (fixture/'Data/Skyrim - Misc.bsa').write_bytes(b'marker')
+        ini=fixture/'UserDocuments/My Games/Skyrim/SKYRIM.INI';ini.parent.mkdir(parents=True)
+        ini.write_text('[Archive]\nsResourceArchiveList=example.bsa\n')
         assert not (fixture/'data').exists(),'Test fixture must actually distinguish path case'
         binary=base/'file-shims-test'
         run('xcrun','clang','-O1','-I',ROOT/'upstream/recomp/host','-I',ROOT/'upstream/recomp',

@@ -7,7 +7,7 @@ with tempfile.TemporaryDirectory() as temp:
     if args.reference:
         for name,macro in [('gheap','FNV_GHEAP_SOURCE'),('shims_kernel32','FNV_KERNEL_SOURCE')]:
             file=temp/(name+'.c');file.write_bytes(subprocess.check_output(['git','show','5576821:upstream/recomp/host/'+name+'.c'],cwd=root));flags+=['-D'+macro+'="'+str(file)+'"']
-    subprocess.run(['xcrun','clang','-O1','-ffunction-sections','-fdata-sections','-I',str(root/'ios'),'-I',str(root/'upstream/recomp/host'),'-I',str(root/'upstream/recomp'),
+    subprocess.run(['xcrun','clang','-O1','-ffunction-sections','-fdata-sections','-I',str(root/'macos'),'-I',str(root/'upstream/recomp/host'),'-I',str(root/'upstream/recomp'),
         *flags,str(root/'tests/virtual_alloc_test.c'),'-Wl,-dead_strip','-o',str(binary)],check=True)
     failures=[]
     for mode in ['occupied','future-heap','future-pages','unreserved-commit','partial-commit','rounding','valid-commit','overflow','zero','spanning-future','spanning-occupied','adjacent']:

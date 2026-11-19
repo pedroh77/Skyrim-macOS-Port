@@ -121,49 +121,17 @@ static void DirectInput8Create_(CPU *c) {
 
 const ShimTable dinput_shims = { (const Shim[]){ {"DirectInput8Create", DirectInput8Create_} }, 1 };
 
-// ---- XInput 1.3: no controller connected yet (M4: GameController framework) ---------------------
+// ---- XInput 1.3 (via macOS GameController framework) ------------------------------------------
 #include "FNVPad.h"
 #include <stdio.h>
-#if defined(FNV_GAME_INPUT_CONTEXT) && !defined(FNV_PROBE)
-static void fnv_sample_game_context(void){
-    // Original GetMenuVisible accepts full decimal IDs 1001..1084 (0x3e9..0x43c).
-    const unsigned base=0x11f308f;
-    uint32_t manager=G32(0x11d8a80);
-    uint32_t mode=manager?G32(manager+0x0c):0;
-    FNVInputContext value=!manager||!MEM[manager]?FNVContextUnknown:(mode==1?FNVContextGameplay:FNVContextMenu);
-    uint32_t map=G32(0x11da368),map_page=map&&map<0xffffff00u?G32(map+0x80):0;
-    if(MEM[base+1001]||MEM[base+1013])value=FNVContextMenu;
-    else if(MEM[base+1023]&&(map_page==32||map_page==33))value=FNVContextPipMap;
-    else if(MEM[base+1002]||MEM[base+1003]||MEM[base+1023])value=FNVContextPipBoy;
-    else if(MEM[base+1056])value=FNVContextVATS;
-    else if(MEM[base+1009])value=FNVContextDialogue;
-    else if(MEM[base+1008])value=FNVContextLoot;
-    else if(MEM[base+1014])value=FNVContextLockpick;
-    else if(MEM[base+1055])value=FNVContextHacking;
-    else if(MEM[base+1057])value=FNVContextComputer;
-    static unsigned logs;static FNVInputContext last=FNVContextUnknown;static uint32_t previous_mode;
-    if((value!=last||mode!=previous_mode)&&logs++<128){
-        unsigned flags=(MEM[base+1002]||MEM[base+1003]||MEM[base+1023]?1:0)|(MEM[base+1056]?2:0)|(MEM[base+1009]?4:0)|(MEM[base+1008]?8:0)|(MEM[base+1014]||MEM[base+1055]||MEM[base+1057]?16:0);
-        fprintf(stderr,"[input-context] kind=%u mode=%u menus=%#x interface=%#x map_page=%u\n",value,mode,flags,manager,map_page);
-        last=value;previous_mode=mode;
-    }
-    fnv_pad_context_set(value);
-    uint32_t sensitivity_bits=G32(0x11e0a70);float sensitivity;
-    memcpy(&sensitivity,&sensitivity_bits,sizeof sensitivity);fnv_pad_camera_sensitivity(sensitivity);
-    uint32_t input=G32(0x11f35cc);
-    if(input&&input<0xffffe000u)fnv_pad_bindings_set(MEM+input+0x1be8);
-}
-#endif
 static void XInputGetState_(CPU *c) {
-#if defined(FNV_GAME_INPUT_CONTEXT) && !defined(FNV_PROBE)
-    fnv_sample_game_context();
-#endif
     if (ARG(c, 0) || !fnv_analog_enabled()) { RET(c, 1167, 2); return; }
     uint32_t out = ARG(c, 1);
     if (!out) { RET(c, 87, 2); return; }
-    FNVPadState state;fnv_pad_snapshot(&state);
-    _Static_assert(sizeof(FNVPadState)==16,"XINPUT_STATE ABI");
-    memcpy(MEM + out,&state,16);
+    FNVPadState state;
+    fnv_pad_snapshot(&state);
+    _Static_assert(sizeof(FNVPadState) == 16, "XINPUT_STATE ABI");
+    memcpy(MEM + out, &state, 16);
     RET(c, 0, 2);
 }
 static void XInputSetState_(CPU *c) { RET(c, ARG(c, 0) || !fnv_analog_enabled() ? 1167 : 0, 2); }
@@ -173,16 +141,13 @@ static void XInputGetCapabilities_(CPU *c) {
     if (!out) { RET(c, 87, 3); return; }
     memset(MEM + out, 0, 20);
     MEM[out] = 1; MEM[out + 1] = 1;
-    MEM[out+4]=0xff;MEM[out+5]=0xf3; // buttons: D-pad, menu, clicks, shoulders and ABXY
-    MEM[out+6]=MEM[out+7]=255; // analog triggers
-    P32(out + 8, 0x7fff7fff);P32(out+12,0x7fff7fff);
+    MEM[out + 4] = 0xff; MEM[out + 5] = 0xf3; // buttons: D-pad, menu, clicks, shoulders and ABXY
+    MEM[out + 6] = MEM[out + 7] = 255;       // analog triggers
+    P32(out + 8, 0x7fff7fff); P32(out + 12, 0x7fff7fff);
     RET(c, 0, 3);
 }
-const ShimTable xinput_shims = { (const Shim[]){ {"xinput1_3#2", XInputGetState_}, {"xinput1_3#3", XInputSetState_},
-    {"xinput1_3#4", XInputGetCapabilities_}, {"XInputGetState", XInputGetState_}, {"XInputSetState", XInputSetState_}, {"XInputGetCapabilities", XInputGetCapabilities_} }, 6 };
-
-// Used only at build-verified camera selection/scaling sites. Other controller mode queries run unchanged.
-void fnv_input_mouse_camera(CPU *c,uint32_t site){
-    if(fnv_analog_enabled()&&!fnv_pad_uses_stick_camera())SETREG(c,R_EAX,REG(c,R_EAX)&~255u);
-    (void)site;
-}
+const ShimTable xinput_shims = { (const Shim[]){
+    {"xinput1_3#2", XInputGetState_}, {"xinput1_3#3", XInputSetState_},
+    {"xinput1_3#4", XInputGetCapabilities_}, {"XInputGetState", XInputGetState_},
+    {"XInputSetState", XInputSetState_}, {"XInputGetCapabilities", XInputGetCapabilities_}
+}, 6 };

@@ -1,0 +1,17 @@
+# Benchmark scenario: Skyrim new-game intro (cart ride).
+#
+# The script syncs to the stable main menu (any draw count >= 9 held for 2 s),
+# starts a new game, syncs to the "Start a new game?" confirmation, confirms it,
+# then lets the intro cinematic play.  The runner measures a fixed 30 s window
+# (script frames 2400..4200 relative to the second sync) inside the cart ride,
+# dumps three frames after the window for visual comparisons and quits cleanly.
+#
+# Frame numbers after a waitsteady are counted from the moment it is satisfied.
+0 waitsteady 120 9
+10 tap 28                # DIK_RETURN: NEW -> "Start a new game?"
+20 waitsteady 90 20      # confirmation dialog is a steady 40-draw screen
+80 tap 28                # DIK_RETURN: Yes
+4300 dump
+4400 dump
+4500 dump
+4800 quit

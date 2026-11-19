@@ -9,17 +9,16 @@
 static pthread_mutex_t lk = PTHREAD_MUTEX_INITIALIZER;
 static uint8_t keys[256];
 static int32_t mdx, mdy, mdz;
-static int64_t touch_mdx,touch_mdy;
 static uint8_t mbtn[8];
 #define QN 1024
-typedef struct { uint32_t ofs, data; int touch; } Ev;
+typedef struct { uint32_t ofs, data; } Ev;
 static Ev q[2][QN];
 static int qh[2], qt[2];
 
 static void push(int dev, uint32_t ofs, uint32_t data) {
     int n = (qt[dev] + 1) % QN;
     if (n == qh[dev]) qh[dev] = (qh[dev] + 1) % QN;       // drop oldest on overflow
-    q[dev][qt[dev]] = (Ev){ofs, data,0};
+    q[dev][qt[dev]] = (Ev){ofs, data};
     qt[dev] = n;
 }
 
@@ -65,19 +64,6 @@ void input_mouse_move(int dx, int dy) {
     if (dy) push(1, 4, (uint32_t)dy);
     pthread_mutex_unlock(&lk);
 }
-void input_touch_mouse_move(int dx,int dy){
-    pthread_mutex_lock(&lk);
-    touch_mdx+=dx;touch_mdy+=dy;
-    if(dx){push(1,0,(uint32_t)dx);q[1][(qt[1]+QN-1)%QN].touch=1;}
-    if(dy){push(1,4,(uint32_t)dy);q[1][(qt[1]+QN-1)%QN].touch=1;}
-    pthread_mutex_unlock(&lk);
-}
-void input_touch_mouse_reset(void){
-    pthread_mutex_lock(&lk);touch_mdx=touch_mdy=0;
-    int write=qh[1];
-    for(int read=qh[1];read!=qt[1];read=(read+1)%QN)if(!q[1][read].touch){q[1][write]=q[1][read];write=(write+1)%QN;}
-    qt[1]=write;pthread_mutex_unlock(&lk);
-}
 void input_mouse_wheel(int dz) { pthread_mutex_lock(&lk); mdz += dz; push(1, 8, (uint32_t)dz); pthread_mutex_unlock(&lk); }
 void input_mouse_button(int b, int down) {
     if (b < 0 || b > 7) return;
@@ -87,11 +73,43 @@ void input_mouse_button(int b, int down) {
 }
 
 void input_keyboard_state(uint8_t out[256]) { pthread_mutex_lock(&lk); memcpy(out, keys, 256); pthread_mutex_unlock(&lk); }
+uint32_t input_map_vk(uint32_t code, uint32_t map_type) {
+    if (map_type == 0) { // MAPVK_VK_TO_VSC
+        for (int dik = 1; dik < 256; dik++) if (dikmap[dik].vk == code) return (uint32_t)dik;
+        return 0;
+    }
+    if (map_type == 1 || map_type == 3) { // MAPVK_VSC_TO_VK / EX
+        return code < 256 ? dikmap[code].vk : 0;
+    }
+    if (map_type == 2) { // MAPVK_VK_TO_CHAR
+        for (int dik = 1; dik < 256; dik++) if (dikmap[dik].vk == code && dikmap[dik].ch) {
+            unsigned char c = (unsigned char)dikmap[dik].ch;
+            return (c >= 'a' && c <= 'z') ? (uint32_t)(c - 32) : c;
+        }
+        return 0;
+    }
+    return 0;
+}
+int input_vk_down(int vk) {
+    pthread_mutex_lock(&lk);
+    int down = 0;
+    for (int dik = 1; dik < 256; dik++) if (dikmap[dik].vk == vk && keys[dik]) { down = 1; break; }
+    pthread_mutex_unlock(&lk);
+    return down;
+}
+int input_vk_to_char(int vk, int shift) {
+    for (int dik = 1; dik < 256; dik++) if (dikmap[dik].vk == vk && dikmap[dik].ch) {
+        char ch = dikmap[dik].ch;
+        if (shift && ch >= 'a' && ch <= 'z') ch = (char)(ch - 32);
+        return (unsigned char)ch;
+    }
+    return 0;
+}
 void input_mouse_state(int32_t *dx, int32_t *dy, int32_t *dz, uint8_t b[8]) {
     pthread_mutex_lock(&lk);
-    int64_t x=(int64_t)mdx+touch_mdx,y=(int64_t)mdy+touch_mdy;
-    *dx = (int32_t)(x>INT_MAX?INT_MAX:x<INT_MIN?INT_MIN:x); *dy = (int32_t)(y>INT_MAX?INT_MAX:y<INT_MIN?INT_MIN:y); *dz = mdz;
-    mdx = mdy = mdz = 0;touch_mdx=touch_mdy=0;memcpy(b, mbtn, 8);
+    *dx = mdx; *dy = mdy; *dz = mdz;
+    mdx = mdy = mdz = 0;
+    memcpy(b, mbtn, 8);
     pthread_mutex_unlock(&lk);
 }
 int input_pending(int dev) { pthread_mutex_lock(&lk); int n = (qt[dev] - qh[dev] + QN) % QN; pthread_mutex_unlock(&lk); return n; }
@@ -117,12 +135,16 @@ int input_pop_event(int dev, uint32_t *ofs, uint32_t *data, int peek_index) {
 //   <frame> waitdraws <n> [<stable>]  from <frame> on, pause the script until a frame has exactly n
 //                                     draws for <stable> consecutive frames (default 30); later
 //                                     frame numbers are then counted from that moment
+//   <frame> waitsteady <frames> [<min_draws>]
+//                                     pause until the draw count stays unchanged for <frames>
+//                                     consecutive frames and is at least <min_draws> (default 0);
+//                                     use this to sync to a static menu regardless of its count
 typedef struct { uint64_t frame; char cmd[16]; int a, b; } Step;
 static Step *steps; static int nsteps, cursor;
 static int64_t shift;
 static volatile int dump_req;
 int input_take_dump_request(void) { int r = dump_req; dump_req = 0; return r; }               // added to step frames once a waitdraws has been satisfied
-static uint64_t last_draws, stable_run;
+static uint64_t last_draws, stable_run, steady_draws, steady_run;
 void input_frame_draws(uint64_t draws_this_frame) { last_draws = draws_this_frame; }
 static void load_script(void) {
     static int loaded;
@@ -181,6 +203,19 @@ void input_script_tick(uint64_t frame) {
             fprintf(stderr, "[input] waitdraws %d satisfied at frame %llu\n", s->a, (unsigned long long)frame);
             shift = (int64_t)frame - (int64_t)s->frame;
             stable_run = 0; cursor++;
+            continue;
+        }
+        if (!strcmp(s->cmd, "waitsteady")) {
+            uint64_t need = s->a ? (uint64_t)s->a : 30;
+            uint64_t min = s->b > 0 ? (uint64_t)s->b : 0;
+            if (last_draws < min) steady_run = 0;
+            else if (last_draws == steady_draws) steady_run++;
+            else { steady_draws = last_draws; steady_run = 1; }
+            if (steady_run < need) return;
+            fprintf(stderr, "[input] waitsteady %llu frames at %llu draws, frame %llu\n",
+                    (unsigned long long)need, (unsigned long long)steady_draws, (unsigned long long)frame);
+            shift = (int64_t)frame - (int64_t)s->frame;
+            steady_run = 0; cursor++;
             continue;
         }
         cursor++;

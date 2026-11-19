@@ -1,0 +1,8 @@
+# Static confirmation-dialog microbenchmark.
+# The camera and UI do not move, so every configuration measures exactly the
+# same scene.  The dialog is small on the CPU (GPU-bound on the M1); use the
+# [perf] gpu_ms value, not fps, to compare upscalers at a matched render scale.
+0 waitsteady 120 9
+10 tap 28
+20 waitsteady 90 20
+600 quit
