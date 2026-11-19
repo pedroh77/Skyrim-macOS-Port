@@ -23,16 +23,64 @@ A native Apple Silicon (`arm64`) macOS port of **The Elder Scrolls V: Skyrim** (
 
 ---
 
+## Obtaining the Windows Game Files on macOS
+
+Because original 32-bit *Skyrim* ("Oldrim", AppID `72850`) is a Windows-only release on Steam (unlisted from Steam search, though still purchasable via direct link at `https://store.steampowered.com/app/72850/`), you can fetch the game files directly on your Mac using any of the methods below. All output paths shown here are auto-detected by `quick-install.sh`.
+
+> **Important:** Only the original 32-bit *Skyrim* (AppID `72850`, patch `1.9.32.0.8`) is supported — **not** *Skyrim Special Edition* or *Anniversary Edition*.
+
+### Method A — `steamcmd` (recommended)
+
+```sh
+brew install --cask steamcmd
+steamcmd +@sSteamCmdForcePlatformType windows +login <YOUR_STEAM_USERNAME> +app_update 72850 validate +quit
+```
+
+*This single command downloads the game along with all DLCs/expansions owned by your Steam account (Dawnguard, Hearthfire, Dragonborn, and the High Resolution Texture Pack, if owned) directly into `~/Library/Application Support/Steam/steamapps/common/Skyrim` (or `~/Steam/steamapps/common/Skyrim`), both of which `quick-install.sh` auto-detects. Pass `+force_install_dir "$HOME/Downloads/Skyrim"` before `+login` if you prefer a separate folder.*
+
+### Method B — `DepotDownloader`
+
+```sh
+brew tap steamre/tools
+brew install depotdownloader
+depotdownloader -app 72850 -os windows -username <YOUR_STEAM_USERNAME> \
+  -dir "$HOME/Downloads/Skyrim"
+```
+
+*If you omit `-dir`, DepotDownloader places files under `./depots/72850/<manifest>/` (`~/depots/72850/` and `~/Downloads/depots/72850/` are also auto-detected).*
+
+### Method C — Steam Client Console
+
+1. Open the hidden Console tab in the desktop Steam client:
+   ```sh
+   open "steam://open/console"
+   ```
+2. Download the base Windows depots (plus any DLC depots you own — check Depot IDs on SteamDB if needed):
+   ```text
+   download_depot 72850 72851
+   download_depot 72850 72852
+   download_depot 72850 72853
+   ```
+3. Steam saves each depot separately under:
+   `~/Library/Application Support/Steam/steamapps/content/app_72850/depot_*/`
+   Merge the contents of those `depot_*` folders into `~/Downloads/Skyrim/` so `TESV.exe` and `Data/` sit together in one folder.
+
+---
+
 ## Quick Install
 
 ```sh
+# Auto-detect game files (Steam, SteamCMD, DepotDownloader, Downloads, Games)
+./quick-install.sh
+
+# Or pass an explicit path
 ./quick-install.sh "/path/to/Skyrim"
 ```
 
 To also wrap the app in a drag-to-Applications `.dmg`:
 
 ```sh
-./quick-install.sh --dmg "/path/to/Skyrim"
+./quick-install.sh --dmg
 ```
 
 The finished app is installed at `~/Applications/Skyrim.app`.
@@ -41,7 +89,7 @@ To build a standalone app without the Steam launcher, Overlay hook or
 `libsteam_api.dylib` (offline mode):
 
 ```sh
-./quick-install.sh --no-steam "/path/to/Skyrim"
+./quick-install.sh --no-steam
 ```
 
 * User data (`Skyrim.ini`, `SkyrimPrefs.ini`, saves, and `LocalAppData/Skyrim/plugins.txt`) is stored in `~/Library/Application Support/Skyrim/UserDocuments`.
