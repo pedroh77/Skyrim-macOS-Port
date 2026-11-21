@@ -1,6 +1,8 @@
 # Relatório técnico — sessão DSH (2026-11-19)
 
-**Projeto:** `/Users/pedro/git/Skyrim-macOS-Shim` — port nativo Apple Silicon do Skyrim 32-bit (Oldrim 1.9.32.0.8) via recompilação estática x86→ARM64 e D3D9→Metal.
+> **Nota (2026-11-20):** o projeto foi renomeado de `Skyrim-macOS-Shim` para `Skyrim-macOS-Port`. O diretório local já usa o nome novo; o repositório no GitHub acompanha o rename.
+
+**Projeto:** `/Users/pedro/git/Skyrim-macOS-Port` — port nativo Apple Silicon do Skyrim 32-bit (Oldrim 1.9.32.0.8) via recompilação estática x86→ARM64 e D3D9→Metal.
 **Máquina:** MacBook Air M1 2020, 7-core GPU, 8 GB, macOS 27.2.1 (26B131), painel 2560×1600.
 **Intervalo coberto:** desde o fechamento do relatório de **2026-11-18 21:45** até **2026-11-19 02:30**.
 **Relatório anterior:** `docs/SESSION-REPORT-2026-11-18.md` (janela de opções, harness de benchmark, análise MetalFX, diagnóstico do display 2560×1600 vs 2880×1800, sem commit).
@@ -15,7 +17,7 @@
 2. **FXAA implementado e testado:** novo modo `FXAA (Fast, Post-Process)` ao lado de Off/SMAA, shader FXAA 3.11 em MSL, pipeline próprio no `d3d9_metal.m`, pass aplicado na resolução interna antes do MetalFX. Teste: `aa=fxaa`, 60 fps, sem erro de shader.
 3. **Detecção do painel físico corrigida:** o app agora detecta **2560×1600** (painel) mesmo com o desktop em 2880×1800 (backing 2×), e tem override `SKYRIM_OUTPUT_WIDTH/HEIGHT`. Teste: `physical panel 2560x1600 (desktop backing 2880x1800)`, render 1714×1072 → output 2560×1600 (67%), MetalFX.
 4. **App final construído, instalado e assinado:** `/Users/pedro/Applications/Skyrim.app`, 15 GB, `SkyrimLauncher` como `CFBundleExecutable`, `libsteam_api.dylib` universal, `steam_appid.txt=72850`, assinatura ad-hoc profunda válida. O fix do `NSWindow` do relatório anterior foi mantido.
-5. **Fork publicado:** `https://github.com/pedroh77/Skyrim-macOS-Shim` (público, fork de `arjuk95-dot/FNV-iOS-Shim`), `main` no commit **`441d596`** (113 arquivos, 88.134 inserções, 3.286 deleções). Branch local `skyrim` rastreando `skyrim/main`.
+5. **Fork publicado:** `https://github.com/pedroh77/Skyrim-macOS-Port` (público, fork de `arjuk95-dot/FNV-iOS-Shim`), `main` no commit **`441d596`** (113 arquivos, 88.134 inserções, 3.286 deleções). Branch local `skyrim` rastreando `skyrim/main`.
 6. **Presets de sombra investigados:** o app altera 5 chaves de `SkyrimPrefs.ini` (mapas principal/secundário, `iShadowMapResolution`, `fShadowDistance`, `iBlurDeferredShadowMask`). No benchmark da carroça (67% MFX, sem VSync): Low e Medium ~11 ms GPU / 200–239 fps; High ~14 ms / 181–206 fps (**+~25% GPU, −10–15% fps, +27 MB**). O `Keep` com um ini novo/padrão crashou por falta de `iShadowMapResolution`; o ini atual do usuário tem a chave.
 7. **Ini do usuário ajustado:** `bShadowsOnGrass=0`, `fShadowDistance=1500`, `iShadowSplitCount=1`, `fInteriorShadowDistance=1500`, `iShadowFilter=2`; mapas 1024/512 e blur 3 mantidos. O modo correto para preservar isso é **Keep**.
 8. **Limitações:** Overlay/achievements não testados visualmente; benchmark de sombras parcial (keep crashou; low/medium/high deram timeout no runner, mas os logs têm dados); app ad-hoc (Gatekeeper); avisos de link com Unicorn/FFmpeg compilados para macOS 27 vs alvo 14; `tests/run.sh`/host-check não rodaram nesta sessão; o Info.plist do app ainda grava o commit-base `6600879`.
@@ -27,7 +29,7 @@
 - O relatório de 2026-11-18 terminou com: bug da janela corrigido, harness em `tools/bench/`, MetalFX medido, display diagnosticado (2880×1800 de backing), **nada commitado**, builds em `/tmp/skyrim-build` e `/tmp/skyrim-bench-build`.
 - O estado agora:
   - App instalado em `~/Applications/Skyrim.app` (não mais `/tmp`).
-  - `.git` do projeto agora tem o branch `skyrim` e o commit `441d596`, publicado no fork `pedroh77/Skyrim-macOS-Shim`.
+  - `.git` do projeto agora tem o branch `skyrim` e o commit `441d596`, publicado no fork `pedroh77/Skyrim-macOS-Port`.
   - O remote `origin` continua sendo `arjuk95-dot/FNV-iOS-Shim`; o remote `skyrim` aponta para o fork.
   - Build com `quick-install.sh` usando `--no-call-trace`; o app final tem `FNVGuestCallTraceEnabled=false`.
   - `SkyrimPrefs.ini` do usuário agora está em modo custom (Medium maps + ajustes de performance); o `Skyrim.ini` ainda tem `iShadowMapResolutionPrimary=2048`.
@@ -249,7 +251,7 @@ bShadowsOnGrass=0
 
 ## 9. Fork, commit e publicação
 
-- Fork: `https://github.com/pedroh77/Skyrim-macOS-Shim` — público, `isFork=true`, parent `arjuk95-dot/FNV-iOS-Shim`.
+- Fork: `https://github.com/pedroh77/Skyrim-macOS-Port` — público, `isFork=true`, parent `arjuk95-dot/FNV-iOS-Shim`.
 - `main` = **`441d596`**: *"Convert FNV-iOS-Shim to The Elder Scrolls V: Skyrim (32-bit LE) macOS port"*; 113 arquivos, 88.134 inserções, 3.286 deleções; inclui Steam, FXAA, painel, README, `tools/bench`, docs e os fontes.
 - Descrição/tópicos do repo ajustados no GitHub.
 - Localmente: branch `skyrim` rastreando `skyrim/main`; `origin` = FNV; `skyrim` = fork.
@@ -317,8 +319,8 @@ bShadowsOnGrass=0
 - `tools/bench/*` (harness)
 
 **Git**
-- Repo: `/Users/pedro/git/Skyrim-macOS-Shim`; branch `skyrim`; `441d596`.
-- Fork: `https://github.com/pedroh77/Skyrim-macOS-Shim`; parent `arjuk95-dot/FNV-iOS-Shim`; `origin` FNV; `skyrim` fork.
+- Repo: `/Users/pedro/git/Skyrim-macOS-Port`; branch `skyrim`; `441d596`.
+- Fork: `https://github.com/pedroh77/Skyrim-macOS-Port`; parent `arjuk95-dot/FNV-iOS-Shim`; `origin` FNV; `skyrim` fork.
 
 ---
 

@@ -1,6 +1,8 @@
 # Relatório técnico — sessão DSH (2026-11-18)
 
-**Projeto:** `/Users/pedro/git/Skyrim-macOS-Shim` — port nativo Apple Silicon do Skyrim 32-bit (Oldrim) via recompilação estática e D3D9→Metal.
+> **Nota (2026-11-20):** o projeto foi renomeado de `Skyrim-macOS-Shim` para `Skyrim-macOS-Port`. O diretório local já usa o nome novo; o repositório no GitHub acompanha o rename.
+
+**Projeto:** `/Users/pedro/git/Skyrim-macOS-Port` — port nativo Apple Silicon do Skyrim 32-bit (Oldrim) via recompilação estática e D3D9→Metal.
 **Máquina:** MacBook Air M1 2020, 7-core GPU, 8 GB, macOS 27.2.1 (26B131), painel 2560×1600.
 **Objetivo desta sessão:** (1) diagnosticar/corrigir o crash introduzido pela janela de opções; (2) criar uma forma objetiva de medir e comparar escala de render × MetalFX.
 
@@ -25,9 +27,9 @@
 
 ## 2. Contexto e estado do repositório
 
-- Diretório ativo: `/Users/pedro/git/Skyrim-macOS-Shim`.
+- Diretório ativo: `/Users/pedro/git/Skyrim-macOS-Port`.
 - O projeto nasceu de uma cópia do FNV-iOS-Shim; o usuário criou depois o fork `pedroh77/FalloutNewVegas-macOS-Shim` para o port macOS do FNV. O Skyrim é um segundo fork local nunca publicado.
-- O `.git` em `Skyrim-macOS-Shim` aponta para `git@github.com:arjuk95-dot/FNV-iOS-Shim.git`, HEAD `6600879` (branch `macos`), e **não** tem histórico do Skyrim. Os arquivos do Skyrim aparecem como untracked; o `git status` mostra deleções/modificações do FNV (ios/, testes etc.). O Info.plist grava `FNVBuildSourceCommit=6600879` (commit do FNV). Não alterei isso.
+- O `.git` em `Skyrim-macOS-Port` aponta para `git@github.com:arjuk95-dot/FNV-iOS-Shim.git`, HEAD `6600879` (branch `macos`), e **não** tem histórico do Skyrim. Os arquivos do Skyrim aparecem como untracked; o `git status` mostra deleções/modificações do FNV (ios/, testes etc.). O Info.plist grava `FNVBuildSourceCommit=6600879` (commit do FNV). Não alterei isso.
 - Builds:
   - `/tmp/skyrim-build/Skyrim.app` — jogo com a correção da janela; a build antiga que crashava foi renomeada para `/tmp/skyrim-build/Skyrim.app.crashy-20261118`.
   - `/tmp/skyrim-bench-build/Skyrim.app` — build de benchmark, com `waitsteady` no input e paridade bilinear headless.
