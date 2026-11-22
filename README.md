@@ -107,6 +107,8 @@ Optional flags:
 
 The finished app is installed at `~/Applications/Skyrim.app`.
 
+* The bundle uses a dedicated identifier (`dev.skyrimmac.<target>`) and the installer registers it with LaunchServices (`lsregister -f`). macOS Game Mode caches its notice icon by bundle identifier; see [docs/GAME-MODE-ICONS.md](docs/GAME-MODE-ICONS.md) for the observed behavior and the checklist for future ports (e.g. Oblivion).
+
 * User data (`Skyrim.ini`, `SkyrimPrefs.ini`, saves, and `LocalAppData/Skyrim/plugins.txt`) is stored in `~/Library/Application Support/Skyrim/UserDocuments`.
 * Logs are written to `~/Library/Logs/Skyrim/skyrim.log`.
 

@@ -247,6 +247,8 @@ def main():
             CFBundleExecutable=bundle_exe,
             CFBundleName=app_name,
             CFBundleDisplayName=app_name,
+            # unique per-port identity; see docs/GAME-MODE-ICONS.md for the Game Mode
+            # icon-cache behavior and the checklist for future ports (e.g. Oblivion)
             CFBundleIdentifier='dev.skyrimmac.' + args.target,
             CFBundlePackageType='APPL',
             CFBundleVersion=args.version,
