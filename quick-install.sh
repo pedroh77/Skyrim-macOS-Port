@@ -5,9 +5,10 @@
 # SteamStub DRM via Steamless CLI + Mono if needed) into a standalone Apple
 # Silicon macOS bundle ("Skyrim.app").
 #
-# Usage: quick-install.sh [--dmg] [--keep-ghidra] [--no-steam] [game_files_dir]
+# Usage: quick-install.sh [--dmg] [--keep-cache] [--keep-ghidra] [--no-steam] [game_files_dir]
 #   --dmg            also wrap the app in "Skyrim.dmg"
-#   --keep-ghidra    keep the Ghidra project and P-code JSONL after translation
+#   --keep-cache     keep ~/Library/Caches/skyrim-macos after a successful build (for faster rebuilds)
+#   --keep-ghidra    keep the Ghidra project and P-code JSONL after translation (implies --keep-cache)
 #   --no-steam       keep the build standalone (skip Steam launcher, Overlay hook & libsteam_api.dylib)
 #   game_files_dir   optional folder containing TESV.exe and Data/
 #                    or an existing "Skyrim.app" bundle.
@@ -164,17 +165,31 @@ run_task() {
 # Options & System Checks
 # ---------------------------------------------------------------------------
 WANT_DMG=no
+KEEP_CACHE=no
+[ -n "${SKYRIM_KEEP_CACHE:-}" ] && [ "${SKYRIM_KEEP_CACHE}" != "0" ] && KEEP_CACHE=yes || true
 KEEP_GHIDRA=no
 NO_STEAM=no
 GAME_ARG=""
+BREW_INSTALLED=()
 for arg in "$@"; do
 	case "$arg" in
 		--dmg) WANT_DMG=yes ;;
-		--keep-ghidra) KEEP_GHIDRA=yes ;;
+		--keep-cache) KEEP_CACHE=yes ;;
+		--keep-ghidra) KEEP_GHIDRA=yes; KEEP_CACHE=yes ;;
 		--no-steam) NO_STEAM=yes ;;
+		-*) die "Unknown option: $arg" ;;
 		*) GAME_ARG="$arg" ;;
 	esac
 done
+
+require_brew() {
+	local reason="$1"
+	if ! command -v brew >/dev/null 2>&1; then
+		die "Homebrew is required $reason." \
+			"Install Homebrew (https://brew.sh) and re-run this script:" \
+			'  /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"'
+	fi
+}
 
 banner
 
@@ -284,9 +299,9 @@ is_supported_unpacked_sha() {
 
 unpack_steam_drm() {
 	if ! command -v mono >/dev/null 2>&1; then
-		command -v brew >/dev/null 2>&1 || die "Homebrew is required to install Mono for Steamless." \
-			"Install Homebrew from https://brew.sh and re-run this script."
+		require_brew "to install Mono for Steamless"
 		run_task "Installing Mono runtime via Homebrew" brew install mono
+		BREW_INSTALLED+=(mono)
 	fi
 	local mono_bin
 	mono_bin="$(command -v mono || true)"
@@ -371,10 +386,7 @@ fi
 # ---------------------------------------------------------------------------
 step "Checking Homebrew tools (ghidra, unicorn, cmake, ffmpeg)"
 
-if ! command -v brew >/dev/null 2>&1; then
-	die "Homebrew is required to install Ghidra and Unicorn." \
-		"Install from https://brew.sh and re-run this script."
-fi
+require_brew "to install build tools (ghidra, unicorn, cmake, ffmpeg)"
 
 MISSING_BREW=()
 for pkg in ghidra unicorn cmake ffmpeg; do
@@ -385,6 +397,7 @@ done
 
 if [ ${#MISSING_BREW[@]} -gt 0 ]; then
 	run_task "Installing via Homebrew: ${MISSING_BREW[*]}" brew install "${MISSING_BREW[@]}"
+	BREW_INSTALLED+=("${MISSING_BREW[@]}")
 fi
 
 HEADLESS="$(brew --prefix ghidra)/libexec/support/analyzeHeadless"
@@ -507,7 +520,7 @@ PY
 	fi
 
 	if [ "$KEEP_GHIDRA" = no ]; then
-		rm -rf "$GHIDRA_PROJ" "$JSONL" "$JSONL.regs.json"
+		rm -rf "$GHIDRA_PROJ" "$JSONL" "$JSONL.regs.json" "$JSONL.userops.json"
 		ok "Cleaned temporary Ghidra project & P-code dump to save disk space"
 	fi
 fi
@@ -648,6 +661,68 @@ sign_bundle() {
 }
 run_task "Ad-hoc signing $APP_NAME.app" sign_bundle || die "Code signing failed"
 
+is_protected_dir() {
+	local p="${1%/}"
+	case "$p" in
+		""|/|/Applications|/Users|"$HOME"|"$HOME/Applications"|"$HOME/Desktop"|"$HOME/Documents"|"$HOME/Downloads"|"$HOME/Games"|"$HOME/Library"|/tmp|/var/tmp)
+			return 0 ;;
+	esac
+	return 1
+}
+
+cleanup_source_leftovers() {
+	local src="${ASSET_SRC%/}"
+	[ -d "$src" ] || return 0
+
+	# Never delete an existing .app bundle when rebuilding from it
+	case "$src" in
+		*/Contents/Resources/GameData) return 0 ;;
+	esac
+
+	# Remove matching Steam appmanifest_72850.acf if source was a Steam steamapps/common folder
+	case "$src" in
+		*/steamapps/common/*)
+			local steamapps_dir game_folder acf
+			steamapps_dir="$(dirname "$(dirname "$src")")"
+			game_folder="$(basename "$src")"
+			acf="$steamapps_dir/appmanifest_72850.acf"
+			if [ -f "$acf" ] && grep -Fqi "\"$game_folder\"" "$acf" 2>/dev/null; then
+				rm -f "$acf"
+				ok "Removed Steam manifest $(basename "$acf")"
+			fi
+			;;
+	esac
+
+	if ! is_protected_dir "$src"; then
+		rm -rf "$src"
+		ok "Cleaned leftover source folder: $src"
+		case "$src" in
+			*/depots/*/*)
+				rmdir "$(dirname "$src")" 2>/dev/null || true
+				rmdir "$(dirname "$(dirname "$src")")" 2>/dev/null || true
+				;;
+		esac
+	fi
+}
+
+cleanup_build_cache() {
+	if [ "$KEEP_CACHE" = no ]; then
+		rm -rf "$CACHE_ROOT"
+		ok "Cleaned build & translation cache ($CACHE_ROOT; pass --keep-cache to retain it)"
+	else
+		ok "Kept build & translation cache at $CACHE_ROOT (--keep-cache)"
+	fi
+}
+
+print_post_install_notes() {
+	if [ ${#BREW_INSTALLED[@]} -gt 0 ]; then
+		printf '\n  %sHomebrew packages installed during this run:%s %s\n' "$BOLD" "$RESET" "${BREW_INSTALLED[*]}"
+		printf '  None of them are required to play. To uninstall them later:\n'
+		printf '    brew uninstall %s && brew cleanup\n' "${BREW_INSTALLED[*]}"
+	fi
+	printf '\n'
+}
+
 mkdir -p "$DEST_DIR"
 if [ "$WANT_DMG" = no ]; then
 	rm -rf "$DEST_DIR/$APP_NAME.app"
@@ -656,10 +731,13 @@ if [ "$WANT_DMG" = no ]; then
 	touch "$DEST_DIR/$APP_NAME.app"
 	LSREG="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
 	[ -x "$LSREG" ] && "$LSREG" -f "$DEST_DIR/$APP_NAME.app" >/dev/null 2>&1 || true
+	cleanup_source_leftovers
+	cleanup_build_cache
 	ok "Placed $APP_NAME.app in $DEST_DIR"
 	printf '\n%s✔ Done!%s %s is ready.\n' "$GREEN$BOLD" "$RESET" "$DEST_DIR/$APP_NAME.app"
 	printf '  Double-click it in Applications (or Launchpad/Spotlight) to play.\n'
-	printf '  Saves & INIs live in ~/Library/Application Support/Skyrim/\n\n'
+	printf '  Saves & INIs live in ~/Library/Application Support/Skyrim/\n'
+	print_post_install_notes
 	open -R "$DEST_DIR/$APP_NAME.app" 2>/dev/null || true
 	exit 0
 fi
@@ -674,5 +752,8 @@ run_task "Creating disk image" hdiutil create -srcfolder "$STAGE" -volname "$VOL
 rm -f "$DEST_DIR/$APP_NAME.dmg"
 run_task "Compressing disk image" hdiutil convert "$TMPDMG" -format UDZO -imagekey zlib-level=9 -o "$DEST_DIR/$APP_NAME.dmg" >/dev/null
 GDATA=""
+cleanup_source_leftovers
+cleanup_build_cache
 ok "Created $DEST_DIR/$APP_NAME.dmg"
+print_post_install_notes
 open -R "$DEST_DIR/$APP_NAME.dmg" 2>/dev/null || true

@@ -519,10 +519,12 @@ class FnEmitter:
     def emit(self):
         fn = self.fn
         insns = sorted(fn["insns"], key=lambda i: i["a"])
+        if not insns:
+            raise Unsupported("empty function")
         if any("GS:" in i["m"] for i in insns):
             raise Unsupported("GS segment")
         body = []
-        if insns and insns[0]["a"] != fn["entry"]:
+        if insns[0]["a"] != fn["entry"]:
             if fn["entry"] not in self.addrs:
                 raise Unsupported("entry not in body")
             body.append(f"  goto L_{hx(fn['entry'])};")

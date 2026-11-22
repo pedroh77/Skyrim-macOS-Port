@@ -4,6 +4,21 @@ A native Apple Silicon (`arm64`) macOS port of **The Elder Scrolls V: Skyrim** (
 
 > **Status:** Active porting effort adapted from the Fallout: New Vegas macOS static recompiler architecture.
 
+## Quick Start
+
+**What you need upfront:**
+1. An **Apple Silicon Mac** (M1 or newer) running **macOS 14 (Sonoma)** or later.
+2. **Apple Command Line Tools** (`xcode-select --install`) and **[Homebrew](https://brew.sh/)** — `quick-install.sh` automatically installs every other build tool it needs (`ghidra`, `unicorn`, `cmake`, `ffmpeg`, and `mono` for SteamStub DRM) and none of them are required to play once `Skyrim.app` is built (see [Notes on Cleanup](#notes-on-cleanup)).
+3. **Your own Steam PC copy** of original 32-bit *Skyrim* (AppID `72850`, patch `1.9.32.0.8` — not Special/Anniversary Edition), downloaded via `steamcmd` (see [Obtaining the Windows Game Files on macOS](#obtaining-the-windows-game-files-on-macos)).
+
+**Build & install:**
+
+```sh
+./quick-install.sh
+```
+
+The finished app is placed in `~/Applications/Skyrim.app`.
+
 ---
 
 ## Requirements & Supported Executable
@@ -77,24 +92,60 @@ depotdownloader -app 72850 -os windows -username <YOUR_STEAM_USERNAME> \
 ./quick-install.sh "/path/to/Skyrim"
 ```
 
-To also wrap the app in a drag-to-Applications `.dmg`:
+Optional flags:
 
 ```sh
+# Also wrap the app in a drag-to-Applications .dmg
 ./quick-install.sh --dmg
+
+# Build standalone offline without Steam launcher, Overlay hook, or libsteam_api.dylib
+./quick-install.sh --no-steam
+
+# Keep ~/Library/Caches/skyrim-macos after a successful build (for faster incremental rebuilds)
+./quick-install.sh --keep-cache
 ```
 
 The finished app is installed at `~/Applications/Skyrim.app`.
 
-To build a standalone app without the Steam launcher, Overlay hook or
-`libsteam_api.dylib` (offline mode):
-
-```sh
-./quick-install.sh --no-steam
-```
-
 * User data (`Skyrim.ini`, `SkyrimPrefs.ini`, saves, and `LocalAppData/Skyrim/plugins.txt`) is stored in `~/Library/Application Support/Skyrim/UserDocuments`.
 * Logs are written to `~/Library/Logs/Skyrim/skyrim.log`.
-* Translation and object caches are stored in `~/Library/Caches/skyrim-macos/`.
+
+> **Note on disk usage & automatic cleanup:** to avoid duplicating roughly 9–12 GB of game data, `quick-install.sh` **moves** the playable game files into `~/Applications/Skyrim.app` (`Contents/Resources/GameData/`), **deletes leftover Windows-only files** from the source folder (Steam `steamapps/common/Skyrim` or DepotDownloader folders), removes Steam's `appmanifest_72850.acf` so Steam does not keep an uninstallable ghost entry in your Mac library (Steam achievements, Overlay, playtime, and "Playing" status do not depend on the `.acf` file), and **deletes the build/translation cache (`~/Library/Caches/skyrim-macos`) automatically** once the app is built and signed (pass `--keep-cache` or set `SKYRIM_KEEP_CACHE=1` to keep it for faster rebuilds). Existing `.app` bundles are never deleted when rebuilding from them.
+
+---
+
+## Notes on Cleanup
+
+**None of the build tools are needed to play the game once `Skyrim.app` is built.** `libunicorn.a` is statically linked into the app binary, `.bik` cutscenes are already converted to `.mp4`, and Ghidra only runs during translation.
+
+`quick-install.sh` cleans up leftover source files and `~/Library/Caches/skyrim-macos` automatically upon success (unless `--keep-cache` is passed), and intentionally does **not** uninstall global software from your Mac. At the end of a run, it prints the exact list of any Homebrew packages it installed together with a ready-to-copy `brew uninstall` command.
+
+If you installed build tools only for this port and want to remove them later:
+
+1. **Homebrew packages used for building/downloading** (or run the exact `brew uninstall ...` command printed at the end of `quick-install.sh`; edit this list to omit anything you want to keep):
+   ```sh
+   for p in ghidra unicorn cmake ffmpeg mono depotdownloader steamcmd; do brew list "$p" &>/dev/null && brew uninstall "$p"; done && brew cleanup
+   ```
+   Optional: if you added the DepotDownloader tap:
+   ```sh
+   brew untap steamre/tools 2>/dev/null
+   ```
+
+2. **Build & translation cache** (already removed automatically unless you passed `--keep-cache` or an earlier run stopped mid-way):
+   ```sh
+   rm -rf ~/Library/Caches/skyrim-macos
+   ```
+
+3. **Homebrew & Apple Command Line Tools (optional — only if you installed them solely for this port):**
+   * Uninstall Homebrew using the [official Homebrew uninstall script](https://github.com/homebrew/install#uninstall-homebrew).
+   * Uninstall Apple Command Line Tools:
+     ```sh
+     sudo rm -rf /Library/Developer/CommandLineTools
+     ```
+
+**Keep these files to continue playing:**
+* `~/Applications/Skyrim.app` (the game itself).
+* `~/Library/Application Support/Skyrim/` (saves and `.ini` settings).
 
 ---
 
