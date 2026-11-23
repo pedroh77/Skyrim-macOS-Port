@@ -45,3 +45,5 @@ void d3d_backend_present(D3DState *s);
 // held from begin to end.
 const uint8_t *d3d_surf_begin(uint32_t surf);
 void d3d_surf_end(void);
+uint8_t *d3d_surf_write_begin(uint32_t surf, uint32_t *pitch, uint32_t *size);
+void d3d_surf_write_end(uint32_t surf);

@@ -183,6 +183,17 @@ const uint8_t *d3d_surf_begin(uint32_t s) {
     return e ? (const uint8_t *)ev_tab[e - 1].p : d ? MEM + d : NULL;
 }
 void d3d_surf_end(void) { pthread_mutex_unlock(&ev_lk); }
+uint8_t *d3d_surf_write_begin(uint32_t s, uint32_t *pitch, uint32_t *size) {
+    if (!s || OBJ_KIND(s) != K_SURF) return NULL;
+    uint32_t d = surf_pin(s);
+    if (pitch) *pitch = G32(OBJ_F(s, S_PITCH));
+    if (size) *size = d ? gsize(d) : 0;
+    return d ? MEM + d : NULL;
+}
+void d3d_surf_write_end(uint32_t s) {
+    if (!s || OBJ_KIND(s) != K_SURF) return;
+    surf_unpin(s);
+}
 static void surf_drop_evicted(uint32_t s) {          // free: discard a host copy
     pthread_mutex_lock(&ev_lk);
     uint32_t e = G32(OBJ_F(s, S_EVICT));

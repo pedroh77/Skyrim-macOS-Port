@@ -823,6 +823,13 @@ static NSString *exeHash(NSURL *url) {
             if (!strongSelf) return event;
             if (event.window == strongSelf.window || event.type == NSEventTypeFlagsChanged) {
                 if (strongSelf.window.isKeyWindow) {
+                    // Let macOS Metal Performance HUD shortcuts (Shift+Fn+F9 / Shift+Fn+F7)
+                    // pass through to the system instead of swallowing them or triggering F9.
+                    if ((event.type == NSEventTypeKeyDown || event.type == NSEventTypeKeyUp) &&
+                        (event.modifierFlags & NSEventModifierFlagShift) &&
+                        (event.keyCode == 0x65 || event.keyCode == 0x62)) {
+                        return event;
+                    }
                     [strongSelf handleEvent:event];
                     if ((event.type == NSEventTypeKeyDown || event.type == NSEventTypeKeyUp) &&
                         !(event.modifierFlags & NSEventModifierFlagCommand)) {
@@ -940,6 +947,13 @@ static NSString *exeHash(NSURL *url) {
             if (!strongSelf) return event;
             if (event.window == strongSelf.window || event.type == NSEventTypeFlagsChanged) {
                 if (strongSelf.window.isKeyWindow) {
+                    // Let macOS Metal Performance HUD shortcuts (Shift+Fn+F9 / Shift+Fn+F7)
+                    // pass through to the system instead of swallowing them or triggering F9.
+                    if ((event.type == NSEventTypeKeyDown || event.type == NSEventTypeKeyUp) &&
+                        (event.modifierFlags & NSEventModifierFlagShift) &&
+                        (event.keyCode == 0x65 || event.keyCode == 0x62)) {
+                        return event;
+                    }
                     [strongSelf handleEvent:event];
                     if ((event.type == NSEventTypeKeyDown || event.type == NSEventTypeKeyUp) &&
                         !(event.modifierFlags & NSEventModifierFlagCommand)) {

@@ -1030,7 +1030,59 @@ static void d3d_backend_colorfill_impl(D3DState *s, uint32_t surf, uint32_t rect
     end_pass();
     memcpy(s->rt, saved, sizeof saved); s->ds = sd;
 }
-static void d3d_backend_readback_impl(D3DState *s, uint32_t rt, uint32_t dst) { (void)s; (void)rt; (void)dst; }   // TODO: screenshots / GPU readback
+static void d3d_backend_readback_impl(D3DState *s, uint32_t rt, uint32_t dst) {
+    (void)s;
+    if (!rt || !dst || OBJ_KIND(rt) != K_SURF || OBJ_KIND(dst) != K_SURF) return;
+    NSUInteger sl = 0, ss = 0;
+    id<MTLTexture> src = surf_target(rt, &sl, &ss);
+    if (!src) return;
+    uint32_t dw = G32(OBJ_F(dst, S_W)), dh = G32(OBJ_F(dst, S_H)), dfmt = G32(OBJ_F(dst, S_FMT));
+    if (!dw || !dh || d3d_fmt_block(dfmt)) return;
+    Fmt f = fmt_map(dfmt);
+    MTLPixelFormat pf = f.pf != MTLPixelFormatInvalid ? f.pf : src.pixelFormat;
+    MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:pf width:dw height:dh mipmapped:NO];
+    td.storageMode = MTLStorageModeShared;
+    td.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+    id<MTLTexture> staging = [dev newTextureWithDescriptor:td];
+    if (!staging) return;
+    end_pass(); ensure_cmd();
+    NSUInteger sw = MAX((NSUInteger)1, src.width >> sl), sh = MAX((NSUInteger)1, src.height >> sl);
+    if (src.sampleCount == 1 && sw == dw && sh == dh && src.pixelFormat == pf) {
+        id<MTLBlitCommandEncoder> b = [cmd blitCommandEncoder];
+        [b copyFromTexture:src sourceSlice:ss sourceLevel:sl sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(dw, dh, 1)
+                 toTexture:staging destinationSlice:0 destinationLevel:0 destinationOrigin:MTLOriginMake(0, 0, 0)];
+        [b endEncoding];
+    } else {
+        blit(src, staging, 0, 0, 1);
+    }
+    end_pass();
+    [cmd commit];
+    [cmd waitUntilCompleted];
+    cmd = nil;
+    uint32_t pitch = 0, sz = 0;
+    uint8_t *out = d3d_surf_write_begin(dst, &pitch, &sz);
+    if (out) {
+        if (dfmt == 20) { // D3DFMT_R8G8B8 (24-bit BGR)
+            size_t bpr = (size_t)dw * 4;
+            uint8_t *tmp = malloc(bpr * dh);
+            if (tmp) {
+                [staging getBytes:tmp bytesPerRow:bpr fromRegion:MTLRegionMake2D(0, 0, dw, dh) mipmapLevel:0];
+                for (uint32_t y = 0; y < dh && (uint64_t)(y + 1) * pitch <= sz; y++) {
+                    const uint8_t *sp = tmp + (size_t)y * bpr;
+                    uint8_t *dp = out + (size_t)y * pitch;
+                    for (uint32_t x = 0; x < dw; x++) {
+                        dp[0] = sp[0]; dp[1] = sp[1]; dp[2] = sp[2];
+                        sp += 4; dp += 3;
+                    }
+                }
+                free(tmp);
+            }
+        } else if ((uint64_t)pitch * dh <= sz) {
+            [staging getBytes:out bytesPerRow:pitch fromRegion:MTLRegionMake2D(0, 0, dw, dh) mipmapLevel:0];
+        }
+    }
+    d3d_surf_write_end(dst);
+}
 
 // ---- resource lifetime --------------------------------------------------------------------------------
 // Shader prewarm: the game creates (nearly) all its shaders at boot. Translate each one's default

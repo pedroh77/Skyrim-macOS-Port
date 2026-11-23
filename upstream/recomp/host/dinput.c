@@ -17,9 +17,26 @@ static uint32_t vt_di8, vt_dev;
 static void QueryInterface_(CPU *c) { P32(ARG(c, 2), 0); RET(c, 0x80004002u, 3); }   // E_NOINTERFACE
 
 // ---- IDirectInputDevice8A ---------------------------------------------------------------------
-static void Dev_GetCapabilities(CPU *c) { uint32_t p = ARG(c, 1); uint32_t sz = G32(p); memset(MEM + p + 4, 0, sz > 4 ? sz - 4 : 0); RET(c, 0, 2); }
 // device kind lives in the COM data word: 0 keyboard, 1 mouse
 static int dev_kind(CPU *c) { return (int)G32(COM_DATA(COM_THIS(c))); }
+static void Dev_GetCapabilities(CPU *c) {
+    uint32_t p = ARG(c, 1), sz = G32(p);
+    if (sz > 4) memset(MEM + p + 4, 0, sz - 4);
+    if (sz >= 24) {
+        P32(p + 4, 1); // DIDC_ATTACHED
+        if (dev_kind(c) == 1) {
+            P32(p + 8, 0x00000212u); // DI8DEVTYPE_MOUSE | DI8DEVTYPEMOUSE_TRADITIONAL
+            P32(p + 12, 3);          // dwAxes (X, Y, Z)
+            P32(p + 16, 8);          // dwButtons (DIMOUSESTATE2)
+        } else {
+            P32(p + 8, 0x00000413u); // DI8DEVTYPE_KEYBOARD | DI8DEVTYPEKEYBOARD_PCENH
+            P32(p + 12, 0);          // dwAxes
+            P32(p + 16, 128);        // dwButtons
+        }
+        P32(p + 20, 0); // dwPOVs
+    }
+    RET(c, 0, 2);
+}
 static uint64_t n_state[2], n_data[2], n_delivered[2];
 static int trace_in(void) { static int t = -1; if (t < 0) t = getenv("FNV_TRACE_INPUT") != NULL; return t; }
 static void report(void) {
@@ -71,7 +88,25 @@ COM_STUB_OK(Dev_Unacquire, 0)
 COM_STUB_OK(Dev_SetEventNotification, 1)
 COM_STUB_OK(Dev_Poll, 0)
 COM_STUB_OK(Dev_EnumObjects, 3)
-COM_STUB_OK(Dev_GetObjectInfo, 3)
+static void Dev_GetObjectInfo(CPU *c) {
+    uint32_t out = ARG(c, 1), obj = ARG(c, 2), how = ARG(c, 3);
+    uint32_t sz = out ? G32(out) : 0;
+    if (out && sz > 4) memset(MEM + out + 4, 0, sz - 4);
+    if (out && sz >= 32 + 260) {
+        const char *name = "";
+        char buf[32];
+        if (dev_kind(c) == 1) {
+            uint32_t ofs = (how == 1 /* DIPH_BYOFFSET */) ? obj : (obj & 0xFF);
+            if (ofs == 0) name = "X-axis";
+            else if (ofs == 4) name = "Y-axis";
+            else if (ofs == 8) name = "Wheel";
+            else if (ofs >= 12 && ofs < 20) { snprintf(buf, sizeof buf, "Button %u", ofs - 12); name = buf; }
+        }
+        P32(out + 20, obj);
+        snprintf((char *)(MEM + out + 32), 260, "%s", name);
+    }
+    RET(c, 0, 4);
+}
 COM_STUB_OK(Dev_GetDeviceInfo, 1)
 COM_STUB_OK(Dev_RunControlPanel, 2)
 COM_STUB_OK(Dev_Initialize, 3)
