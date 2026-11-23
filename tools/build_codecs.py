@@ -19,7 +19,7 @@ def main():
         build=out/(name+'-build')
         common=['cmake','-S',source,'-B',build,'-DCMAKE_BUILD_TYPE=Release','-DCMAKE_C_COMPILER='+compiler,
           '-DCMAKE_OSX_ARCHITECTURES=arm64','-DCMAKE_OSX_SYSROOT='+sdkpath,
-          '-DCMAKE_OSX_DEPLOYMENT_TARGET='+('18.0' if a.platform=='ios' else '15.0'),
+          '-DCMAKE_OSX_DEPLOYMENT_TARGET='+('18.0' if a.platform=='ios' else '14.0'),
           '-DCMAKE_SYSTEM_NAME='+('iOS' if a.platform=='ios' else 'Darwin'),
           '-DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY','-DCMAKE_POLICY_VERSION_MINIMUM=3.5',
           '-DCMAKE_INSTALL_PREFIX='+str(prefix),'-DCMAKE_PREFIX_PATH='+str(prefix),
