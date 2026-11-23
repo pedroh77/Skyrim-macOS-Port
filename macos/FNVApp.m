@@ -204,6 +204,10 @@ static const uint8_t mac2dik[128] = {
 };
 
 #ifndef FNV_PROBE
+static NSString *const kPrefQualityPreset = @"SkyrimQualityPreset";
+static NSString *const kPrefTextureQuality = @"SkyrimTextureQuality";
+static NSString *const kPrefAnisotropy = @"SkyrimAnisotropy";
+static NSString *const kPrefWaterReflections = @"SkyrimWaterReflections";
 static NSString *const kPrefRenderScale = @"SkyrimRenderScale";
 static NSString *const kPrefUpscaler = @"SkyrimUpscaler";
 static NSString *const kPrefAntiAliasing = @"SkyrimAntiAliasing";
@@ -213,14 +217,36 @@ static NSString *const kPrefMouseAccel = @"SkyrimMouseAcceleration";
 static NSString *const kPrefSkipLauncher = @"SkyrimSkipLauncher";
 
 typedef struct {
+    int preset;          // 0=Keep SkyrimPrefs.ini, 1=Low, 2=Medium, 3=High, 4=Ultra
+    int textureQuality;  // 0=High (skip 0), 1=Medium (skip 1), 2=Low (skip 2)
+    int anisotropy;      // 0, 2, 4, 8, 16
+    int waterQuality;    // 0=Off, 1=Low (Land), 2=Medium (Land+Trees), 3=High (All)
     unsigned renderScale;
     int upscaler;
     int antiAliasing;
-    int shadowQuality;
+    int shadowQuality;   // 0=Keep, 1=Low (512), 2=Medium (1024), 3=High (2048), 4=Ultra (4096)
     BOOL fullscreen;
     BOOL mouseAcceleration;
     BOOL skipLauncher;
 } SkyrimOptions;
+
+static void applySkyrimPresetDefaults(SkyrimOptions *opts, int preset) {
+    switch (preset) {
+    case 1: // Low
+        opts->textureQuality = 2; opts->anisotropy = 0; opts->shadowQuality = 1; opts->waterQuality = 0;
+        break;
+    case 2: // Medium
+        opts->textureQuality = 1; opts->anisotropy = 4; opts->shadowQuality = 2; opts->waterQuality = 1;
+        break;
+    case 3: // High
+        opts->textureQuality = 0; opts->anisotropy = 8; opts->shadowQuality = 3; opts->waterQuality = 2;
+        break;
+    case 4: // Ultra
+    default:
+        opts->textureQuality = 0; opts->anisotropy = 16; opts->shadowQuality = 4; opts->waterQuality = 3;
+        break;
+    }
+}
 
 static unsigned clampScale(long v) {
     if (v < 50) return 50;
@@ -231,6 +257,19 @@ static unsigned clampScale(long v) {
 static SkyrimOptions loadOptions(unsigned nativeW) {
     NSUserDefaults *ud = NSUserDefaults.standardUserDefaults;
     SkyrimOptions opts;
+    id pObj = [ud objectForKey:kPrefQualityPreset];
+    opts.preset = pObj ? (int)[pObj integerValue] : 3; // High default
+    if (opts.preset < 0 || opts.preset > 4) opts.preset = 3;
+    applySkyrimPresetDefaults(&opts, opts.preset > 0 ? opts.preset : 3);
+    if (opts.preset == 0) opts.shadowQuality = 0;
+
+    id tObj = [ud objectForKey:kPrefTextureQuality];
+    if (tObj) { opts.textureQuality = (int)[tObj integerValue]; if (opts.textureQuality < 0 || opts.textureQuality > 2) opts.textureQuality = 0; }
+    id anObj = [ud objectForKey:kPrefAnisotropy];
+    if (anObj) { opts.anisotropy = (int)[anObj integerValue]; if (opts.anisotropy < 0 || opts.anisotropy > 16) opts.anisotropy = 8; }
+    id wObj = [ud objectForKey:kPrefWaterReflections];
+    if (wObj) { opts.waterQuality = (int)[wObj integerValue]; if (opts.waterQuality < 0 || opts.waterQuality > 3) opts.waterQuality = 2; }
+
     unsigned defScale = (nativeW >= 2000u) ? 75u : 100u;
     id sObj = [ud objectForKey:kPrefRenderScale];
     opts.renderScale = sObj ? clampScale([sObj integerValue]) : defScale;
@@ -240,8 +279,7 @@ static SkyrimOptions loadOptions(unsigned nativeW) {
     opts.antiAliasing = aObj ? (int)[aObj integerValue] : 0;
     if (opts.antiAliasing < 0 || opts.antiAliasing > 2) opts.antiAliasing = 0;
     id shObj = [ud objectForKey:kPrefShadowQuality];
-    opts.shadowQuality = shObj ? (int)[shObj integerValue] : 0;
-    if (opts.shadowQuality < 0 || opts.shadowQuality > 3) opts.shadowQuality = 0;
+    if (shObj) { opts.shadowQuality = (int)[shObj integerValue]; if (opts.shadowQuality < 0 || opts.shadowQuality > 4) opts.shadowQuality = 3; }
     id fsObj = [ud objectForKey:kPrefFullscreen];
     opts.fullscreen = fsObj ? [fsObj boolValue] : YES;
     id maObj = [ud objectForKey:kPrefMouseAccel];
@@ -267,6 +305,7 @@ static SkyrimOptions loadOptions(unsigned nativeW) {
         if (!strcasecmp(envSh, "low") || !strcmp(envSh, "1")) opts.shadowQuality = 1;
         else if (!strcasecmp(envSh, "medium") || !strcmp(envSh, "2")) opts.shadowQuality = 2;
         else if (!strcasecmp(envSh, "high") || !strcmp(envSh, "3")) opts.shadowQuality = 3;
+        else if (!strcasecmp(envSh, "ultra") || !strcmp(envSh, "4")) opts.shadowQuality = 4;
         else if (!strcasecmp(envSh, "keep") || !strcmp(envSh, "0")) opts.shadowQuality = 0;
     }
     const char *envMA = getenv("SKYRIM_MOUSE_ACCEL");
@@ -277,6 +316,10 @@ static SkyrimOptions loadOptions(unsigned nativeW) {
 
 static void saveOptions(SkyrimOptions opts) {
     NSUserDefaults *ud = NSUserDefaults.standardUserDefaults;
+    [ud setInteger:opts.preset forKey:kPrefQualityPreset];
+    [ud setInteger:opts.textureQuality forKey:kPrefTextureQuality];
+    [ud setInteger:opts.anisotropy forKey:kPrefAnisotropy];
+    [ud setInteger:opts.waterQuality forKey:kPrefWaterReflections];
     [ud setInteger:(NSInteger)opts.renderScale forKey:kPrefRenderScale];
     [ud setInteger:opts.upscaler forKey:kPrefUpscaler];
     [ud setInteger:opts.antiAliasing forKey:kPrefAntiAliasing];
@@ -317,6 +360,10 @@ static NSString *exeHash(NSURL *url) {
 @property (nonatomic) id eventMonitor;
 #ifndef FNV_PROBE
 @property (nonatomic, strong) NSWindow *optionsWindow;
+@property (nonatomic, strong) NSPopUpButton *presetPopup;
+@property (nonatomic, strong) NSPopUpButton *texturePopup;
+@property (nonatomic, strong) NSPopUpButton *anisoPopup;
+@property (nonatomic, strong) NSPopUpButton *waterPopup;
 @property (nonatomic, strong) NSPopUpButton *scalePopup;
 @property (nonatomic, strong) NSPopUpButton *upscalerPopup;
 @property (nonatomic, strong) NSPopUpButton *aaPopup;
@@ -528,6 +575,29 @@ static NSString *exeHash(NSURL *url) {
     }
 }
 
+- (void)updateSkyrimDetailControlsEnabled {
+    BOOL enable = (self.presetPopup.selectedItem.tag != 0);
+    self.texturePopup.enabled = enable;
+    self.anisoPopup.enabled = enable;
+    self.waterPopup.enabled = enable;
+}
+
+- (void)presetChanged:(id)sender {
+    (void)sender;
+    int p = (int)self.presetPopup.selectedItem.tag;
+    if (p > 0) {
+        SkyrimOptions tmp = {0};
+        applySkyrimPresetDefaults(&tmp, p);
+        [self.texturePopup selectItemWithTag:tmp.textureQuality];
+        [self.anisoPopup selectItemWithTag:tmp.anisotropy];
+        [self.shadowPopup selectItemWithTag:tmp.shadowQuality];
+        [self.waterPopup selectItemWithTag:tmp.waterQuality];
+    } else {
+        [self.shadowPopup selectItemWithTag:0];
+    }
+    [self updateSkyrimDetailControlsEnabled];
+}
+
 - (void)scaleChanged:(id)sender {
     (void)sender;
     [self updateOptionsPreview];
@@ -541,6 +611,10 @@ static NSString *exeHash(NSURL *url) {
 - (void)playClicked:(id)sender {
     (void)sender;
     SkyrimOptions opts;
+    opts.preset = (int)self.presetPopup.selectedItem.tag;
+    opts.textureQuality = (int)self.texturePopup.selectedItem.tag;
+    opts.anisotropy = (int)self.anisoPopup.selectedItem.tag;
+    opts.waterQuality = (int)self.waterPopup.selectedItem.tag;
     opts.renderScale = [self selectedRenderScale];
     opts.upscaler = (int)self.upscalerPopup.selectedItem.tag;
     opts.antiAliasing = (int)self.aaPopup.selectedItem.tag;
@@ -551,6 +625,10 @@ static NSString *exeHash(NSURL *url) {
     saveOptions(opts);
     // Re-apply env overrides if caller explicitly passed them
     SkyrimOptions launchOpts = loadOptions(self.nativeW);
+    launchOpts.preset = opts.preset;
+    launchOpts.textureQuality = opts.textureQuality;
+    launchOpts.anisotropy = opts.anisotropy;
+    launchOpts.waterQuality = opts.waterQuality;
     launchOpts.renderScale = getenv("SKYRIM_RENDER_SCALE") ? launchOpts.renderScale : opts.renderScale;
     launchOpts.upscaler = getenv("SKYRIM_UPSCALER") ? launchOpts.upscaler : opts.upscaler;
     launchOpts.antiAliasing = getenv("SKYRIM_AA") ? launchOpts.antiAliasing : opts.antiAliasing;
@@ -561,7 +639,7 @@ static NSString *exeHash(NSURL *url) {
 }
 
 - (void)showOptionsWindow:(SkyrimOptions)opts {
-    NSRect rect = NSMakeRect(0, 0, 480, 390);
+    NSRect rect = NSMakeRect(0, 0, 480, 548);
     self.optionsWindow = [[NSWindow alloc] initWithContentRect:rect
                                                      styleMask:(NSWindowStyleMaskTitled | NSWindowStyleMaskClosable)
                                                        backing:NSBackingStoreBuffered
@@ -576,7 +654,7 @@ static NSString *exeHash(NSURL *url) {
 
     NSTextField *title = [NSTextField labelWithString:@"Graphics & Input Options"];
     title.font = [NSFont boldSystemFontOfSize:15];
-    title.frame = NSMakeRect(24, 354, 432, 22);
+    title.frame = NSMakeRect(24, 512, 432, 22);
     [cv addSubview:title];
 
     NSString *dispStr = (self.backingW != self.nativeW || self.backingH != self.nativeH)
@@ -587,10 +665,10 @@ static NSString *exeHash(NSURL *url) {
     NSTextField *sub = [NSTextField labelWithString:dispStr];
     sub.font = [NSFont systemFontOfSize:12];
     sub.textColor = NSColor.secondaryLabelColor;
-    sub.frame = NSMakeRect(24, 334, 432, 16);
+    sub.frame = NSMakeRect(24, 492, 432, 16);
     [cv addSubview:sub];
 
-    NSBox *sep1 = [[NSBox alloc] initWithFrame:NSMakeRect(24, 322, 432, 1)];
+    NSBox *sep1 = [[NSBox alloc] initWithFrame:NSMakeRect(24, 480, 432, 1)];
     sep1.boxType = NSBoxSeparator;
     [cv addSubview:sep1];
 
@@ -607,8 +685,19 @@ static NSString *exeHash(NSURL *url) {
         return p;
     };
 
-    mkLabel(@"Render Scale:", 286);
-    self.scalePopup = mkPopup(284);
+    mkLabel(@"Quality Preset:", 444);
+    self.presetPopup = mkPopup(442);
+    [self.presetPopup addItemWithTitle:@"Ultra"]; self.presetPopup.lastItem.tag = 4;
+    [self.presetPopup addItemWithTitle:@"High (Recommended)"]; self.presetPopup.lastItem.tag = 3;
+    [self.presetPopup addItemWithTitle:@"Medium"]; self.presetPopup.lastItem.tag = 2;
+    [self.presetPopup addItemWithTitle:@"Low"]; self.presetPopup.lastItem.tag = 1;
+    [self.presetPopup addItemWithTitle:@"Keep SkyrimPrefs.ini"]; self.presetPopup.lastItem.tag = 0;
+    [self.presetPopup selectItemWithTag:opts.preset];
+    self.presetPopup.target = self;
+    self.presetPopup.action = @selector(presetChanged:);
+
+    mkLabel(@"Render Scale:", 410);
+    self.scalePopup = mkPopup(408);
     struct { NSString *label; NSInteger tag; } scaleItems[] = {
         {@"100% (Native)", 100}, {@"85% (Quality)", 85}, {@"75% (Recommended)", 75},
         {@"67% (Balanced)", 67}, {@"50% (Performance)", 50},
@@ -629,41 +718,72 @@ static NSString *exeHash(NSURL *url) {
     self.resPreviewLabel = [NSTextField labelWithString:@""];
     self.resPreviewLabel.font = [NSFont systemFontOfSize:11];
     self.resPreviewLabel.textColor = NSColor.secondaryLabelColor;
-    self.resPreviewLabel.frame = NSMakeRect(198, 264, 258, 16);
+    self.resPreviewLabel.frame = NSMakeRect(198, 388, 258, 16);
     [cv addSubview:self.resPreviewLabel];
 
-    mkLabel(@"Upscaler:", 232);
-    self.upscalerPopup = mkPopup(230);
+    mkLabel(@"Upscaler:", 356);
+    self.upscalerPopup = mkPopup(354);
     [self.upscalerPopup addItemWithTitle:@"MetalFX Spatial"]; self.upscalerPopup.lastItem.tag = 1;
     [self.upscalerPopup addItemWithTitle:@"Bilinear"]; self.upscalerPopup.lastItem.tag = 0;
     [self.upscalerPopup selectItemWithTag:opts.upscaler];
 
-    mkLabel(@"Anti-Aliasing:", 198);
-    self.aaPopup = mkPopup(196);
+    mkLabel(@"Anti-Aliasing:", 322);
+    self.aaPopup = mkPopup(320);
     [self.aaPopup addItemWithTitle:@"Off"]; self.aaPopup.lastItem.tag = 0;
     [self.aaPopup addItemWithTitle:@"SMAA (Post-Process)"]; self.aaPopup.lastItem.tag = 1;
     [self.aaPopup addItemWithTitle:@"FXAA (Fast, Post-Process)"]; self.aaPopup.lastItem.tag = 2;
     [self.aaPopup selectItemWithTag:opts.antiAliasing];
 
-    mkLabel(@"Shadow Quality:", 164);
-    self.shadowPopup = mkPopup(162);
+    mkLabel(@"Texture Quality:", 288);
+    self.texturePopup = mkPopup(286);
+    [self.texturePopup addItemWithTitle:@"High"]; self.texturePopup.lastItem.tag = 0;
+    [self.texturePopup addItemWithTitle:@"Medium"]; self.texturePopup.lastItem.tag = 1;
+    [self.texturePopup addItemWithTitle:@"Low"]; self.texturePopup.lastItem.tag = 2;
+    [self.texturePopup selectItemWithTag:opts.textureQuality];
+
+    mkLabel(@"Anisotropic Filtering:", 254);
+    self.anisoPopup = mkPopup(252);
+    [self.anisoPopup addItemWithTitle:@"16x (Max)"]; self.anisoPopup.lastItem.tag = 16;
+    [self.anisoPopup addItemWithTitle:@"8x"]; self.anisoPopup.lastItem.tag = 8;
+    [self.anisoPopup addItemWithTitle:@"4x"]; self.anisoPopup.lastItem.tag = 4;
+    [self.anisoPopup addItemWithTitle:@"2x"]; self.anisoPopup.lastItem.tag = 2;
+    [self.anisoPopup addItemWithTitle:@"Off"]; self.anisoPopup.lastItem.tag = 0;
+    if (![self.anisoPopup selectItemWithTag:opts.anisotropy]) [self.anisoPopup selectItemWithTag:8];
+
+    mkLabel(@"Shadow Quality:", 220);
+    self.shadowPopup = mkPopup(218);
     [self.shadowPopup addItemWithTitle:@"Keep SkyrimPrefs.ini"]; self.shadowPopup.lastItem.tag = 0;
     [self.shadowPopup addItemWithTitle:@"Low (512)"]; self.shadowPopup.lastItem.tag = 1;
     [self.shadowPopup addItemWithTitle:@"Medium (1024)"]; self.shadowPopup.lastItem.tag = 2;
     [self.shadowPopup addItemWithTitle:@"High (2048)"]; self.shadowPopup.lastItem.tag = 3;
+    [self.shadowPopup addItemWithTitle:@"Ultra (4096)"]; self.shadowPopup.lastItem.tag = 4;
     [self.shadowPopup selectItemWithTag:opts.shadowQuality];
 
-    mkLabel(@"Display Mode:", 130);
-    self.displayPopup = mkPopup(128);
+    mkLabel(@"Water Reflections:", 186);
+    self.waterPopup = mkPopup(184);
+    [self.waterPopup addItemWithTitle:@"High (Land, Trees, Objects, Sky)"]; self.waterPopup.lastItem.tag = 3;
+    [self.waterPopup addItemWithTitle:@"Medium (Land & Trees)"]; self.waterPopup.lastItem.tag = 2;
+    [self.waterPopup addItemWithTitle:@"Low (Land Only)"]; self.waterPopup.lastItem.tag = 1;
+    [self.waterPopup addItemWithTitle:@"Off"]; self.waterPopup.lastItem.tag = 0;
+    [self.waterPopup selectItemWithTag:opts.waterQuality];
+
+    mkLabel(@"Display Mode:", 152);
+    self.displayPopup = mkPopup(150);
     [self.displayPopup addItemWithTitle:@"Fullscreen"]; self.displayPopup.lastItem.tag = 1;
     [self.displayPopup addItemWithTitle:@"Windowed"]; self.displayPopup.lastItem.tag = 0;
     [self.displayPopup selectItemWithTag:opts.fullscreen ? 1 : 0];
 
-    self.mouseAccelCheck = [NSButton checkboxWithTitle:@"Disable in-game mouse acceleration (smoother trackpad/mouse)"
+    self.mouseAccelCheck = [NSButton checkboxWithTitle:@"Disable in-game mouse acceleration (smoother mouse)"
                                                 target:nil action:nil];
-    self.mouseAccelCheck.frame = NSMakeRect(24, 96, 432, 18);
+    self.mouseAccelCheck.frame = NSMakeRect(24, 118, 432, 18);
     self.mouseAccelCheck.state = opts.mouseAcceleration ? NSControlStateValueOff : NSControlStateValueOn;
     [cv addSubview:self.mouseAccelCheck];
+
+    NSTextField *mouseTip = [NSTextField labelWithString:@"Tip: for external mice, also disable Pointer Acceleration in System Settings → Mouse."];
+    mouseTip.font = [NSFont systemFontOfSize:11];
+    mouseTip.textColor = NSColor.secondaryLabelColor;
+    mouseTip.frame = NSMakeRect(42, 98, 414, 15);
+    [cv addSubview:mouseTip];
 
     self.skipLauncherCheck = [NSButton checkboxWithTitle:@"Skip this window on next launch (hold Option ⌥ to reopen)"
                                                   target:nil action:nil];
@@ -685,6 +805,7 @@ static NSString *exeHash(NSURL *url) {
     [cv addSubview:playBtn];
 
     [self updateOptionsPreview];
+    [self updateSkyrimDetailControlsEnabled];
     [self.optionsWindow center];
     [self.optionsWindow makeKeyAndOrderFront:nil];
     [NSApp activateIgnoringOtherApps:YES];
@@ -1093,8 +1214,14 @@ static NSString *exeHash(NSURL *url) {
         displaySettings[@"ishadowmapresolutionsecondary"] = @[@"iShadowMapResolutionSecondary", @1024];
         displaySettings[@"iblurdeferredshadowmask"] = @[@"iBlurDeferredShadowMask", @5];
         displaySettings[@"fshadowdistance"] = @[@"fShadowDistance", @"4000.0000"];
+    } else if (opts.shadowQuality == 4) {
+        displaySettings[@"ishadowmapresolution"] = @[@"iShadowMapResolution", @4096];
+        displaySettings[@"ishadowmapresolutionprimary"] = @[@"iShadowMapResolutionPrimary", @4096];
+        displaySettings[@"ishadowmapresolutionsecondary"] = @[@"iShadowMapResolutionSecondary", @2048];
+        displaySettings[@"iblurdeferredshadowmask"] = @[@"iBlurDeferredShadowMask", @3];
+        displaySettings[@"fshadowdistance"] = @[@"fShadowDistance", @"8000.0000"];
     }
-    NSDictionary *settings = @{
+    NSMutableDictionary *settings = [@{
         @"display": displaySettings,
         @"main": @{
             @"bgamepadenable": @[@"bGamepadEnable", @1],
@@ -1102,7 +1229,47 @@ static NSString *exeHash(NSURL *url) {
         @"controls": @{
             @"bmouseacceleration": @[@"bMouseAcceleration", opts.mouseAcceleration ? @1 : @0],
         },
-    };
+    } mutableCopy];
+    if (opts.preset > 0) {
+        displaySettings[@"itexmipmapskip"] = @[@"iTexMipMapSkip", @(opts.textureQuality)];
+        displaySettings[@"imaxanisotropy"] = @[@"iMaxAnisotropy", @(opts.anisotropy)];
+        displaySettings[@"bfloatpointrendertarget"] = @[@"bFloatPointRenderTarget", @0];
+        settings[@"water"] = @{
+            @"breflectlodland":    @[@"bReflectLODLand",    (opts.waterQuality >= 1) ? @1 : @0],
+            @"breflectlodtrees":   @[@"bReflectLODTrees",   (opts.waterQuality >= 2) ? @1 : @0],
+            @"breflectlodobjects": @[@"bReflectLODObjects", (opts.waterQuality >= 3) ? @1 : @0],
+            @"breflectsky":        @[@"bReflectSky",        (opts.waterQuality >= 3) ? @1 : @0],
+        };
+        if (opts.preset == 1) {
+            settings[@"lod"] = @{
+                @"flodfadeoutmultactors":  @[@"fLODFadeOutMultActors",  @"4.0000"],
+                @"flodfadeoutmultitems":   @[@"fLODFadeOutMultItems",   @"2.5000"],
+                @"flodfadeoutmultobjects": @[@"fLODFadeOutMultObjects", @"3.5000"],
+            };
+            settings[@"grass"] = @{@"fgrassstartfadedistance": @[@"fGrassStartFadeDistance", @"2000.0000"]};
+        } else if (opts.preset == 2) {
+            settings[@"lod"] = @{
+                @"flodfadeoutmultactors":  @[@"fLODFadeOutMultActors",  @"6.0000"],
+                @"flodfadeoutmultitems":   @[@"fLODFadeOutMultItems",   @"4.0000"],
+                @"flodfadeoutmultobjects": @[@"fLODFadeOutMultObjects", @"5.0000"],
+            };
+            settings[@"grass"] = @{@"fgrassstartfadedistance": @[@"fGrassStartFadeDistance", @"3500.0000"]};
+        } else if (opts.preset == 3) {
+            settings[@"lod"] = @{
+                @"flodfadeoutmultactors":  @[@"fLODFadeOutMultActors",  @"9.0000"],
+                @"flodfadeoutmultitems":   @[@"fLODFadeOutMultItems",   @"7.0000"],
+                @"flodfadeoutmultobjects": @[@"fLODFadeOutMultObjects", @"9.0000"],
+            };
+            settings[@"grass"] = @{@"fgrassstartfadedistance": @[@"fGrassStartFadeDistance", @"5000.0000"]};
+        } else {
+            settings[@"lod"] = @{
+                @"flodfadeoutmultactors":  @[@"fLODFadeOutMultActors",  @"15.0000"],
+                @"flodfadeoutmultitems":   @[@"fLODFadeOutMultItems",   @"15.0000"],
+                @"flodfadeoutmultobjects": @[@"fLODFadeOutMultObjects", @"15.0000"],
+            };
+            settings[@"grass"] = @{@"fgrassstartfadedistance": @[@"fGrassStartFadeDistance", @"7000.0000"]};
+        }
+    }
     for (NSString *section in settings) {
         NSDictionary *keys = settings[section];
         NSMutableSet *pending = [NSMutableSet setWithArray:keys.allKeys];
