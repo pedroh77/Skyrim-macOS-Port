@@ -210,6 +210,9 @@ The launcher (`SkyrimSkipLauncher`/Options window) exposes:
   MetalFX/bilinear upscale).
 * **Render Scale:** 50–100 % (internal resolution; the output is the physical
   panel).
+* **Field of View:** `Original (65° / 65°)`, `Expanded (85° / 80°)`, `Wide (95° / 85°)`,
+  `Custom`, or `Keep Skyrim.ini`, synced with separate **World FOV** (`65°–105°`) and
+  **1st-Person FOV** (`65°–95°`) sliders.
 * **Shadow Quality / Fullscreen / Mouse acceleration** options.
 
 Environment overrides for automation and troubleshooting:
@@ -217,7 +220,8 @@ Environment overrides for automation and troubleshooting:
 * `SKYRIM_RENDER_SCALE=50..100`
 * `SKYRIM_UPSCALER=metalfx|bilinear`
 * `SKYRIM_AA=off|smaa|fxaa`
-* `SKYRIM_SHADOWS=keep|low|medium|high`
+* `SKYRIM_SHADOWS=keep|low|medium|high|ultra`
+* `SKYRIM_FOV=65..105` / `SKYRIM_1ST_PERSON_FOV=65..95`
 * `SKYRIM_MOUSE_ACCEL=0|1`
 * `SKYRIM_OUTPUT_WIDTH`/`SKYRIM_OUTPUT_HEIGHT` — force the output resolution
   instead of the detected physical panel.

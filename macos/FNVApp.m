@@ -212,6 +212,9 @@ static NSString *const kPrefRenderScale = @"SkyrimRenderScale";
 static NSString *const kPrefUpscaler = @"SkyrimUpscaler";
 static NSString *const kPrefAntiAliasing = @"SkyrimAntiAliasing";
 static NSString *const kPrefShadowQuality = @"SkyrimShadowQuality";
+static NSString *const kPrefFovPreset = @"SkyrimFovPreset";
+static NSString *const kPrefWorldFov = @"SkyrimWorldFov";
+static NSString *const kPrefFirstPersonFov = @"SkyrimFirstPersonFov";
 static NSString *const kPrefFullscreen = @"SkyrimFullscreen";
 static NSString *const kPrefMouseAccel = @"SkyrimMouseAcceleration";
 static NSString *const kPrefSkipLauncher = @"SkyrimSkipLauncher";
@@ -225,10 +228,41 @@ typedef struct {
     int upscaler;
     int antiAliasing;
     int shadowQuality;   // 0=Keep, 1=Low (512), 2=Medium (1024), 3=High (2048), 4=Ultra (4096)
+    int fovPreset;       // 0=Keep Skyrim.ini, 1=Original, 2=Expanded, 3=Wide, 4=Custom
+    int worldFov;        // 65..105 (fDefaultWorldFOV / fDefaultFOV)
+    int firstPersonFov;  // 65..95  (fDefault1stPersonFOV)
     BOOL fullscreen;
     BOOL mouseAcceleration;
     BOOL skipLauncher;
 } SkyrimOptions;
+
+static int clampInt(int v, int lo, int hi) {
+    if (v < lo) return lo;
+    if (v > hi) return hi;
+    return v;
+}
+
+static void applySkyrimFovPresetDefaults(SkyrimOptions *opts, int fovPreset) {
+    switch (fovPreset) {
+    case 2: // Expanded
+        opts->worldFov = 85; opts->firstPersonFov = 80;
+        break;
+    case 3: // Wide
+        opts->worldFov = 95; opts->firstPersonFov = 85;
+        break;
+    case 1: // Original
+    default:
+        opts->worldFov = 65; opts->firstPersonFov = 65;
+        break;
+    }
+}
+
+static int matchingSkyrimFovPreset(int worldFov, int firstPersonFov) {
+    if (worldFov == 65 && firstPersonFov == 65) return 1;
+    if (worldFov == 85 && firstPersonFov == 80) return 2;
+    if (worldFov == 95 && firstPersonFov == 85) return 3;
+    return 4;
+}
 
 static void applySkyrimPresetDefaults(SkyrimOptions *opts, int preset) {
     switch (preset) {
@@ -280,6 +314,19 @@ static SkyrimOptions loadOptions(unsigned nativeW) {
     if (opts.antiAliasing < 0 || opts.antiAliasing > 2) opts.antiAliasing = 0;
     id shObj = [ud objectForKey:kPrefShadowQuality];
     if (shObj) { opts.shadowQuality = (int)[shObj integerValue]; if (opts.shadowQuality < 0 || opts.shadowQuality > 4) opts.shadowQuality = 3; }
+    id fpObj = [ud objectForKey:kPrefFovPreset];
+    opts.fovPreset = fpObj ? (int)[fpObj integerValue] : 1; // Original default
+    if (opts.fovPreset < 0 || opts.fovPreset > 4) opts.fovPreset = 1;
+    applySkyrimFovPresetDefaults(&opts, (opts.fovPreset >= 1 && opts.fovPreset <= 3) ? opts.fovPreset : 1);
+    id wfObj = [ud objectForKey:kPrefWorldFov];
+    if (wfObj) opts.worldFov = clampInt((int)[wfObj integerValue], 65, 105);
+    id fpfObj = [ud objectForKey:kPrefFirstPersonFov];
+    if (fpfObj) opts.firstPersonFov = clampInt((int)[fpfObj integerValue], 65, 95);
+    if (opts.fovPreset >= 1 && opts.fovPreset <= 3) {
+        applySkyrimFovPresetDefaults(&opts, opts.fovPreset);
+    } else if (opts.fovPreset == 4) {
+        opts.fovPreset = matchingSkyrimFovPreset(opts.worldFov, opts.firstPersonFov);
+    }
     id fsObj = [ud objectForKey:kPrefFullscreen];
     opts.fullscreen = fsObj ? [fsObj boolValue] : YES;
     id maObj = [ud objectForKey:kPrefMouseAccel];
@@ -308,6 +355,16 @@ static SkyrimOptions loadOptions(unsigned nativeW) {
         else if (!strcasecmp(envSh, "ultra") || !strcmp(envSh, "4")) opts.shadowQuality = 4;
         else if (!strcasecmp(envSh, "keep") || !strcmp(envSh, "0")) opts.shadowQuality = 0;
     }
+    const char *envFov = getenv("SKYRIM_FOV");
+    if (envFov && envFov[0]) {
+        opts.worldFov = clampInt((int)strtol(envFov, NULL, 10), 65, 105);
+        opts.fovPreset = matchingSkyrimFovPreset(opts.worldFov, opts.firstPersonFov);
+    }
+    const char *envFpFov = getenv("SKYRIM_1ST_PERSON_FOV");
+    if (envFpFov && envFpFov[0]) {
+        opts.firstPersonFov = clampInt((int)strtol(envFpFov, NULL, 10), 65, 95);
+        opts.fovPreset = matchingSkyrimFovPreset(opts.worldFov, opts.firstPersonFov);
+    }
     const char *envMA = getenv("SKYRIM_MOUSE_ACCEL");
     if (envMA && envMA[0]) opts.mouseAcceleration = (atoi(envMA) != 0);
     if (getenv("FNV_WINDOWED")) opts.fullscreen = NO;
@@ -324,10 +381,52 @@ static void saveOptions(SkyrimOptions opts) {
     [ud setInteger:opts.upscaler forKey:kPrefUpscaler];
     [ud setInteger:opts.antiAliasing forKey:kPrefAntiAliasing];
     [ud setInteger:opts.shadowQuality forKey:kPrefShadowQuality];
+    [ud setInteger:opts.fovPreset forKey:kPrefFovPreset];
+    [ud setInteger:opts.worldFov forKey:kPrefWorldFov];
+    [ud setInteger:opts.firstPersonFov forKey:kPrefFirstPersonFov];
     [ud setBool:opts.fullscreen forKey:kPrefFullscreen];
     [ud setBool:opts.mouseAcceleration forKey:kPrefMouseAccel];
     [ud setBool:opts.skipLauncher forKey:kPrefSkipLauncher];
     [ud synchronize];
+}
+
+static void applyIniSettings(NSMutableArray<NSString *> *lines, NSDictionary<NSString *, NSDictionary *> *settings) {
+    for (NSString *section in settings) {
+        NSDictionary *keys = settings[section];
+        NSMutableSet *pending = [NSMutableSet setWithArray:keys.allKeys];
+        BOOL inside = NO;
+        NSInteger insert = -1;
+        for (NSUInteger i = 0; i < lines.count; i++) {
+            NSString *line = [lines[i] stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceCharacterSet];
+            if ([line hasPrefix:@"["] && [line hasSuffix:@"]"]) {
+                if (inside && insert < 0) insert = (NSInteger)i;
+                inside = [[[line substringWithRange:NSMakeRange(1, line.length - 2)] lowercaseString] isEqualToString:section];
+            } else if (inside) {
+                NSRange equal = [line rangeOfString:@"="];
+                if (equal.location != NSNotFound) {
+                    NSString *key = [[[line substringToIndex:equal.location] stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceCharacterSet] lowercaseString];
+                    NSArray *value = keys[key];
+                    if (value) {
+                        lines[i] = [NSString stringWithFormat:@"%@=%@", value[0], value[1]];
+                        [pending removeObject:key];
+                    }
+                }
+            }
+        }
+        if (pending.count > 0) {
+            if (insert < 0) {
+                insert = (NSInteger)lines.count;
+                if (!inside) {
+                    [lines addObject:[NSString stringWithFormat:@"[%@]", section]];
+                    insert++;
+                }
+            }
+            for (NSString *key in pending) {
+                NSArray *value = keys[key];
+                [lines insertObject:[NSString stringWithFormat:@"%@=%@", value[0], value[1]] atIndex:(NSUInteger)insert++];
+            }
+        }
+    }
 }
 
 static NSString *exeHash(NSURL *url) {
@@ -369,6 +468,12 @@ static NSString *exeHash(NSURL *url) {
 @property (nonatomic, strong) NSPopUpButton *aaPopup;
 @property (nonatomic, strong) NSPopUpButton *shadowPopup;
 @property (nonatomic, strong) NSPopUpButton *displayPopup;
+@property (nonatomic, strong) NSPopUpButton *fovPresetPopup;
+@property (nonatomic, strong) NSSlider *worldFovSlider;
+@property (nonatomic, strong) NSSlider *firstPersonFovSlider;
+@property (nonatomic, strong) NSTextField *worldFovValueLabel;
+@property (nonatomic, strong) NSTextField *firstPersonFovValueLabel;
+@property (nonatomic, strong) NSTextField *fovTipLabel;
 @property (nonatomic, strong) NSButton *mouseAccelCheck;
 @property (nonatomic, strong) NSButton *skipLauncherCheck;
 @property (nonatomic, strong) NSTextField *resPreviewLabel;
@@ -603,6 +708,50 @@ static NSString *exeHash(NSURL *url) {
     [self updateOptionsPreview];
 }
 
+- (void)updateFovUI {
+    int fp = (int)self.fovPresetPopup.selectedItem.tag;
+    int wf = clampInt((int)llround(self.worldFovSlider.doubleValue), 65, 105);
+    int fpf = clampInt((int)llround(self.firstPersonFovSlider.doubleValue), 65, 95);
+    BOOL enable = (fp != 0);
+    self.worldFovSlider.enabled = enable;
+    self.firstPersonFovSlider.enabled = enable;
+    self.worldFovValueLabel.stringValue = [NSString stringWithFormat:@"%d°", wf];
+    self.firstPersonFovValueLabel.stringValue = [NSString stringWithFormat:@"%d°", fpf];
+    self.worldFovValueLabel.textColor = enable ? NSColor.labelColor : NSColor.tertiaryLabelColor;
+    self.firstPersonFovValueLabel.textColor = enable ? NSColor.labelColor : NSColor.tertiaryLabelColor;
+    if (!enable) {
+        self.fovTipLabel.stringValue = @"Keeping existing FOV settings in Skyrim.ini.";
+    } else if (wf == 65 && fpf == 65) {
+        self.fovTipLabel.stringValue = @"Vanilla Skyrim defaults (Skyrim.ini).";
+    } else if (fpf > 85) {
+        self.fovTipLabel.stringValue = [NSString stringWithFormat:@">85° 1st-person may clip arms/bows. Saves: \"fov %d\" in console (~).", wf];
+    } else {
+        self.fovTipLabel.stringValue = [NSString stringWithFormat:@"New games apply automatically; existing saves: \"fov %d\" in console (~).", wf];
+    }
+}
+
+- (void)fovPresetChanged:(id)sender {
+    (void)sender;
+    int fp = (int)self.fovPresetPopup.selectedItem.tag;
+    if (fp >= 1 && fp <= 3) {
+        SkyrimOptions tmp = {0};
+        applySkyrimFovPresetDefaults(&tmp, fp);
+        self.worldFovSlider.integerValue = tmp.worldFov;
+        self.firstPersonFovSlider.integerValue = tmp.firstPersonFov;
+    }
+    [self updateFovUI];
+}
+
+- (void)fovSliderChanged:(id)sender {
+    (void)sender;
+    int wf = clampInt((int)llround(self.worldFovSlider.doubleValue), 65, 105);
+    int fpf = clampInt((int)llround(self.firstPersonFovSlider.doubleValue), 65, 95);
+    self.worldFovSlider.integerValue = wf;
+    self.firstPersonFovSlider.integerValue = fpf;
+    [self.fovPresetPopup selectItemWithTag:matchingSkyrimFovPreset(wf, fpf)];
+    [self updateFovUI];
+}
+
 - (void)quitClicked:(id)sender {
     (void)sender;
     [NSApp terminate:nil];
@@ -619,6 +768,9 @@ static NSString *exeHash(NSURL *url) {
     opts.upscaler = (int)self.upscalerPopup.selectedItem.tag;
     opts.antiAliasing = (int)self.aaPopup.selectedItem.tag;
     opts.shadowQuality = (int)self.shadowPopup.selectedItem.tag;
+    opts.fovPreset = (int)self.fovPresetPopup.selectedItem.tag;
+    opts.worldFov = clampInt((int)llround(self.worldFovSlider.doubleValue), 65, 105);
+    opts.firstPersonFov = clampInt((int)llround(self.firstPersonFovSlider.doubleValue), 65, 95);
     opts.fullscreen = (self.displayPopup.selectedItem.tag != 0);
     opts.mouseAcceleration = (self.mouseAccelCheck.state != NSControlStateValueOn);
     opts.skipLauncher = (self.skipLauncherCheck.state == NSControlStateValueOn);
@@ -633,13 +785,18 @@ static NSString *exeHash(NSURL *url) {
     launchOpts.upscaler = getenv("SKYRIM_UPSCALER") ? launchOpts.upscaler : opts.upscaler;
     launchOpts.antiAliasing = getenv("SKYRIM_AA") ? launchOpts.antiAliasing : opts.antiAliasing;
     launchOpts.shadowQuality = getenv("SKYRIM_SHADOWS") ? launchOpts.shadowQuality : opts.shadowQuality;
+    BOOL envHasFov = (getenv("SKYRIM_FOV") && getenv("SKYRIM_FOV")[0]);
+    BOOL envHasFpFov = (getenv("SKYRIM_1ST_PERSON_FOV") && getenv("SKYRIM_1ST_PERSON_FOV")[0]);
+    launchOpts.worldFov = envHasFov ? launchOpts.worldFov : opts.worldFov;
+    launchOpts.firstPersonFov = envHasFpFov ? launchOpts.firstPersonFov : opts.firstPersonFov;
+    launchOpts.fovPreset = (envHasFov || envHasFpFov) ? matchingSkyrimFovPreset(launchOpts.worldFov, launchOpts.firstPersonFov) : opts.fovPreset;
     launchOpts.fullscreen = getenv("FNV_WINDOWED") ? NO : opts.fullscreen;
     launchOpts.mouseAcceleration = getenv("SKYRIM_MOUSE_ACCEL") ? launchOpts.mouseAcceleration : opts.mouseAcceleration;
     [self launchWithOptions:launchOpts];
 }
 
 - (void)showOptionsWindow:(SkyrimOptions)opts {
-    NSRect rect = NSMakeRect(0, 0, 480, 548);
+    NSRect rect = NSMakeRect(0, 0, 480, 622);
     self.optionsWindow = [[NSWindow alloc] initWithContentRect:rect
                                                      styleMask:(NSWindowStyleMaskTitled | NSWindowStyleMaskClosable)
                                                        backing:NSBackingStoreBuffered
@@ -654,7 +811,7 @@ static NSString *exeHash(NSURL *url) {
 
     NSTextField *title = [NSTextField labelWithString:@"Graphics & Input Options"];
     title.font = [NSFont boldSystemFontOfSize:15];
-    title.frame = NSMakeRect(24, 512, 432, 22);
+    title.frame = NSMakeRect(24, 586, 432, 22);
     [cv addSubview:title];
 
     NSString *dispStr = (self.backingW != self.nativeW || self.backingH != self.nativeH)
@@ -665,10 +822,10 @@ static NSString *exeHash(NSURL *url) {
     NSTextField *sub = [NSTextField labelWithString:dispStr];
     sub.font = [NSFont systemFontOfSize:12];
     sub.textColor = NSColor.secondaryLabelColor;
-    sub.frame = NSMakeRect(24, 492, 432, 16);
+    sub.frame = NSMakeRect(24, 566, 432, 16);
     [cv addSubview:sub];
 
-    NSBox *sep1 = [[NSBox alloc] initWithFrame:NSMakeRect(24, 480, 432, 1)];
+    NSBox *sep1 = [[NSBox alloc] initWithFrame:NSMakeRect(24, 557, 432, 1)];
     sep1.boxType = NSBoxSeparator;
     [cv addSubview:sep1];
 
@@ -685,8 +842,8 @@ static NSString *exeHash(NSURL *url) {
         return p;
     };
 
-    mkLabel(@"Quality Preset:", 444);
-    self.presetPopup = mkPopup(442);
+    mkLabel(@"Quality Preset:", 523);
+    self.presetPopup = mkPopup(521);
     [self.presetPopup addItemWithTitle:@"Ultra"]; self.presetPopup.lastItem.tag = 4;
     [self.presetPopup addItemWithTitle:@"High (Recommended)"]; self.presetPopup.lastItem.tag = 3;
     [self.presetPopup addItemWithTitle:@"Medium"]; self.presetPopup.lastItem.tag = 2;
@@ -696,8 +853,8 @@ static NSString *exeHash(NSURL *url) {
     self.presetPopup.target = self;
     self.presetPopup.action = @selector(presetChanged:);
 
-    mkLabel(@"Render Scale:", 410);
-    self.scalePopup = mkPopup(408);
+    mkLabel(@"Render Scale:", 492);
+    self.scalePopup = mkPopup(490);
     struct { NSString *label; NSInteger tag; } scaleItems[] = {
         {@"100% (Native)", 100}, {@"85% (Quality)", 85}, {@"75% (Recommended)", 75},
         {@"67% (Balanced)", 67}, {@"50% (Performance)", 50},
@@ -718,31 +875,31 @@ static NSString *exeHash(NSURL *url) {
     self.resPreviewLabel = [NSTextField labelWithString:@""];
     self.resPreviewLabel.font = [NSFont systemFontOfSize:11];
     self.resPreviewLabel.textColor = NSColor.secondaryLabelColor;
-    self.resPreviewLabel.frame = NSMakeRect(198, 388, 258, 16);
+    self.resPreviewLabel.frame = NSMakeRect(198, 471, 258, 15);
     [cv addSubview:self.resPreviewLabel];
 
-    mkLabel(@"Upscaler:", 356);
-    self.upscalerPopup = mkPopup(354);
+    mkLabel(@"Upscaler:", 443);
+    self.upscalerPopup = mkPopup(441);
     [self.upscalerPopup addItemWithTitle:@"MetalFX Spatial"]; self.upscalerPopup.lastItem.tag = 1;
     [self.upscalerPopup addItemWithTitle:@"Bilinear"]; self.upscalerPopup.lastItem.tag = 0;
     [self.upscalerPopup selectItemWithTag:opts.upscaler];
 
-    mkLabel(@"Anti-Aliasing:", 322);
-    self.aaPopup = mkPopup(320);
+    mkLabel(@"Anti-Aliasing:", 412);
+    self.aaPopup = mkPopup(410);
     [self.aaPopup addItemWithTitle:@"Off"]; self.aaPopup.lastItem.tag = 0;
     [self.aaPopup addItemWithTitle:@"SMAA (Post-Process)"]; self.aaPopup.lastItem.tag = 1;
     [self.aaPopup addItemWithTitle:@"FXAA (Fast, Post-Process)"]; self.aaPopup.lastItem.tag = 2;
     [self.aaPopup selectItemWithTag:opts.antiAliasing];
 
-    mkLabel(@"Texture Quality:", 288);
-    self.texturePopup = mkPopup(286);
+    mkLabel(@"Texture Quality:", 381);
+    self.texturePopup = mkPopup(379);
     [self.texturePopup addItemWithTitle:@"High"]; self.texturePopup.lastItem.tag = 0;
     [self.texturePopup addItemWithTitle:@"Medium"]; self.texturePopup.lastItem.tag = 1;
     [self.texturePopup addItemWithTitle:@"Low"]; self.texturePopup.lastItem.tag = 2;
     [self.texturePopup selectItemWithTag:opts.textureQuality];
 
-    mkLabel(@"Anisotropic Filtering:", 254);
-    self.anisoPopup = mkPopup(252);
+    mkLabel(@"Anisotropic Filtering:", 350);
+    self.anisoPopup = mkPopup(348);
     [self.anisoPopup addItemWithTitle:@"16x (Max)"]; self.anisoPopup.lastItem.tag = 16;
     [self.anisoPopup addItemWithTitle:@"8x"]; self.anisoPopup.lastItem.tag = 8;
     [self.anisoPopup addItemWithTitle:@"4x"]; self.anisoPopup.lastItem.tag = 4;
@@ -750,8 +907,8 @@ static NSString *exeHash(NSURL *url) {
     [self.anisoPopup addItemWithTitle:@"Off"]; self.anisoPopup.lastItem.tag = 0;
     if (![self.anisoPopup selectItemWithTag:opts.anisotropy]) [self.anisoPopup selectItemWithTag:8];
 
-    mkLabel(@"Shadow Quality:", 220);
-    self.shadowPopup = mkPopup(218);
+    mkLabel(@"Shadow Quality:", 319);
+    self.shadowPopup = mkPopup(317);
     [self.shadowPopup addItemWithTitle:@"Keep SkyrimPrefs.ini"]; self.shadowPopup.lastItem.tag = 0;
     [self.shadowPopup addItemWithTitle:@"Low (512)"]; self.shadowPopup.lastItem.tag = 1;
     [self.shadowPopup addItemWithTitle:@"Medium (1024)"]; self.shadowPopup.lastItem.tag = 2;
@@ -759,35 +916,82 @@ static NSString *exeHash(NSURL *url) {
     [self.shadowPopup addItemWithTitle:@"Ultra (4096)"]; self.shadowPopup.lastItem.tag = 4;
     [self.shadowPopup selectItemWithTag:opts.shadowQuality];
 
-    mkLabel(@"Water Reflections:", 186);
-    self.waterPopup = mkPopup(184);
+    mkLabel(@"Water Reflections:", 288);
+    self.waterPopup = mkPopup(286);
     [self.waterPopup addItemWithTitle:@"High (Land, Trees, Objects, Sky)"]; self.waterPopup.lastItem.tag = 3;
     [self.waterPopup addItemWithTitle:@"Medium (Land & Trees)"]; self.waterPopup.lastItem.tag = 2;
     [self.waterPopup addItemWithTitle:@"Low (Land Only)"]; self.waterPopup.lastItem.tag = 1;
     [self.waterPopup addItemWithTitle:@"Off"]; self.waterPopup.lastItem.tag = 0;
     [self.waterPopup selectItemWithTag:opts.waterQuality];
 
-    mkLabel(@"Display Mode:", 152);
-    self.displayPopup = mkPopup(150);
+    mkLabel(@"Display Mode:", 257);
+    self.displayPopup = mkPopup(255);
     [self.displayPopup addItemWithTitle:@"Fullscreen"]; self.displayPopup.lastItem.tag = 1;
     [self.displayPopup addItemWithTitle:@"Windowed"]; self.displayPopup.lastItem.tag = 0;
     [self.displayPopup selectItemWithTag:opts.fullscreen ? 1 : 0];
 
+    mkLabel(@"FOV Preset:", 226);
+    self.fovPresetPopup = mkPopup(224);
+    [self.fovPresetPopup addItemWithTitle:@"Original (65° / 65°)"]; self.fovPresetPopup.lastItem.tag = 1;
+    [self.fovPresetPopup addItemWithTitle:@"Expanded (85° / 80°)"]; self.fovPresetPopup.lastItem.tag = 2;
+    [self.fovPresetPopup addItemWithTitle:@"Wide (95° / 85°)"]; self.fovPresetPopup.lastItem.tag = 3;
+    [self.fovPresetPopup addItemWithTitle:@"Custom"]; self.fovPresetPopup.lastItem.tag = 4;
+    [self.fovPresetPopup addItemWithTitle:@"Keep Skyrim.ini"]; self.fovPresetPopup.lastItem.tag = 0;
+    [self.fovPresetPopup selectItemWithTag:opts.fovPreset];
+    self.fovPresetPopup.target = self;
+    self.fovPresetPopup.action = @selector(fovPresetChanged:);
+
+    mkLabel(@"World FOV:", 197);
+    self.worldFovSlider = [NSSlider sliderWithValue:opts.worldFov minValue:65 maxValue:105 target:self action:@selector(fovSliderChanged:)];
+    self.worldFovSlider.frame = NSMakeRect(196, 194, 214, 24);
+    self.worldFovSlider.numberOfTickMarks = 9;
+    self.worldFovSlider.allowsTickMarkValuesOnly = NO;
+    self.worldFovSlider.continuous = YES;
+    [cv addSubview:self.worldFovSlider];
+
+    self.worldFovValueLabel = [NSTextField labelWithString:@""];
+    self.worldFovValueLabel.font = [NSFont monospacedDigitSystemFontOfSize:12 weight:NSFontWeightRegular];
+    self.worldFovValueLabel.alignment = NSTextAlignmentRight;
+    self.worldFovValueLabel.frame = NSMakeRect(414, 197, 42, 20);
+    [cv addSubview:self.worldFovValueLabel];
+
+    mkLabel(@"1st-Person FOV:", 169);
+    self.firstPersonFovSlider = [NSSlider sliderWithValue:opts.firstPersonFov minValue:65 maxValue:95 target:self action:@selector(fovSliderChanged:)];
+    self.firstPersonFovSlider.frame = NSMakeRect(196, 166, 214, 24);
+    self.firstPersonFovSlider.numberOfTickMarks = 7;
+    self.firstPersonFovSlider.allowsTickMarkValuesOnly = NO;
+    self.firstPersonFovSlider.continuous = YES;
+    [cv addSubview:self.firstPersonFovSlider];
+
+    self.firstPersonFovValueLabel = [NSTextField labelWithString:@""];
+    self.firstPersonFovValueLabel.font = [NSFont monospacedDigitSystemFontOfSize:12 weight:NSFontWeightRegular];
+    self.firstPersonFovValueLabel.alignment = NSTextAlignmentRight;
+    self.firstPersonFovValueLabel.frame = NSMakeRect(414, 169, 42, 20);
+    [cv addSubview:self.firstPersonFovValueLabel];
+
+    self.fovTipLabel = [NSTextField labelWithString:@""];
+    self.fovTipLabel.font = [NSFont systemFontOfSize:11];
+    self.fovTipLabel.textColor = NSColor.secondaryLabelColor;
+    self.fovTipLabel.lineBreakMode = NSLineBreakByWordWrapping;
+    self.fovTipLabel.maximumNumberOfLines = 2;
+    self.fovTipLabel.frame = NSMakeRect(198, 136, 258, 26);
+    [cv addSubview:self.fovTipLabel];
+
     self.mouseAccelCheck = [NSButton checkboxWithTitle:@"Disable in-game mouse acceleration (smoother mouse)"
                                                 target:nil action:nil];
-    self.mouseAccelCheck.frame = NSMakeRect(24, 118, 432, 18);
+    self.mouseAccelCheck.frame = NSMakeRect(24, 110, 432, 18);
     self.mouseAccelCheck.state = opts.mouseAcceleration ? NSControlStateValueOff : NSControlStateValueOn;
     [cv addSubview:self.mouseAccelCheck];
 
     NSTextField *mouseTip = [NSTextField labelWithString:@"Tip: for external mice, also disable Pointer Acceleration in System Settings → Mouse."];
     mouseTip.font = [NSFont systemFontOfSize:11];
     mouseTip.textColor = NSColor.secondaryLabelColor;
-    mouseTip.frame = NSMakeRect(42, 98, 414, 15);
+    mouseTip.frame = NSMakeRect(42, 92, 414, 15);
     [cv addSubview:mouseTip];
 
     self.skipLauncherCheck = [NSButton checkboxWithTitle:@"Skip this window on next launch (hold Option ⌥ to reopen)"
                                                   target:nil action:nil];
-    self.skipLauncherCheck.frame = NSMakeRect(24, 72, 432, 18);
+    self.skipLauncherCheck.frame = NSMakeRect(24, 68, 432, 18);
     self.skipLauncherCheck.state = opts.skipLauncher ? NSControlStateValueOn : NSControlStateValueOff;
     [cv addSubview:self.skipLauncherCheck];
 
@@ -806,6 +1010,7 @@ static NSString *exeHash(NSURL *url) {
 
     [self updateOptionsPreview];
     [self updateSkyrimDetailControlsEnabled];
+    [self updateFovUI];
     [self.optionsWindow center];
     [self.optionsWindow makeKeyAndOrderFront:nil];
     [NSApp activateIgnoringOtherApps:YES];
@@ -1181,9 +1386,26 @@ static NSString *exeHash(NSURL *url) {
         if ([fm fileExistsAtPath:defaultPrefs]) [fm copyItemAtPath:defaultPrefs toPath:prefs error:NULL];
     }
     NSString *skyrimIni = [myGamesDir stringByAppendingPathComponent:@"Skyrim.ini"];
+    for (NSString *leaf in [fm contentsOfDirectoryAtPath:myGamesDir error:NULL]) {
+        if ([leaf caseInsensitiveCompare:@"Skyrim.ini"] == NSOrderedSame) {
+            skyrimIni = [myGamesDir stringByAppendingPathComponent:leaf];
+            break;
+        }
+    }
     if (![fm fileExistsAtPath:skyrimIni]) {
         NSString *defaultIni = [root URLByAppendingPathComponent:@"Skyrim_default.ini"].path;
         if ([fm fileExistsAtPath:defaultIni]) [fm copyItemAtPath:defaultIni toPath:skyrimIni error:NULL];
+    }
+    if (opts.fovPreset != 0) {
+        NSString *iniText = [NSString stringWithContentsOfFile:skyrimIni encoding:NSISOLatin1StringEncoding error:NULL] ?: @"";
+        NSMutableArray<NSString *> *iniLines = [[iniText componentsSeparatedByCharactersInSet:NSCharacterSet.newlineCharacterSet] mutableCopy];
+        applyIniSettings(iniLines, @{
+            @"display": @{
+                @"fdefaultworldfov":     @[@"fDefaultWorldFOV",     [NSString stringWithFormat:@"%.4f", (double)opts.worldFov]],
+                @"fdefault1stpersonfov": @[@"fDefault1stPersonFOV", [NSString stringWithFormat:@"%.4f", (double)opts.firstPersonFov]],
+            },
+        });
+        [[iniLines componentsJoinedByString:@"\n"] writeToFile:skyrimIni atomically:YES encoding:NSISOLatin1StringEncoding error:NULL];
     }
     NSString *text = [NSString stringWithContentsOfFile:prefs encoding:NSISOLatin1StringEncoding error:NULL] ?: @"";
     if ([fm fileExistsAtPath:prefs] && ![fm fileExistsAtPath:[prefs stringByAppendingString:@".before-native-display"]]) {
@@ -1230,6 +1452,11 @@ static NSString *exeHash(NSURL *url) {
             @"bmouseacceleration": @[@"bMouseAcceleration", opts.mouseAcceleration ? @1 : @0],
         },
     } mutableCopy];
+    if (opts.fovPreset != 0) {
+        settings[@"general"] = @{
+            @"fdefaultfov": @[@"fDefaultFOV", [NSString stringWithFormat:@"%.4f", (double)opts.worldFov]],
+        };
+    }
     if (opts.preset > 0) {
         displaySettings[@"itexmipmapskip"] = @[@"iTexMipMapSkip", @(opts.textureQuality)];
         displaySettings[@"imaxanisotropy"] = @[@"iMaxAnisotropy", @(opts.anisotropy)];
@@ -1270,47 +1497,16 @@ static NSString *exeHash(NSURL *url) {
             settings[@"grass"] = @{@"fgrassstartfadedistance": @[@"fGrassStartFadeDistance", @"7000.0000"]};
         }
     }
-    for (NSString *section in settings) {
-        NSDictionary *keys = settings[section];
-        NSMutableSet *pending = [NSMutableSet setWithArray:keys.allKeys];
-        BOOL inside = NO;
-        NSInteger insert = -1;
-        for (NSUInteger i = 0; i < lines.count; i++) {
-            NSString *line = [lines[i] stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceCharacterSet];
-            if ([line hasPrefix:@"["] && [line hasSuffix:@"]"]) {
-                if (inside && insert < 0) insert = (NSInteger)i;
-                inside = [[[line substringWithRange:NSMakeRange(1, line.length - 2)] lowercaseString] isEqualToString:section];
-            } else if (inside) {
-                NSRange equal = [line rangeOfString:@"="];
-                if (equal.location != NSNotFound) {
-                    NSString *key = [[[line substringToIndex:equal.location] stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceCharacterSet] lowercaseString];
-                    NSArray *value = keys[key];
-                    if (value) {
-                        lines[i] = [NSString stringWithFormat:@"%@=%@", value[0], value[1]];
-                        [pending removeObject:key];
-                    }
-                }
-            }
-        }
-        if (insert < 0) {
-            insert = (NSInteger)lines.count;
-            if (!inside) {
-                [lines addObject:[NSString stringWithFormat:@"[%@]", section]];
-                insert++;
-            }
-        }
-        for (NSString *key in pending) {
-            NSArray *value = keys[key];
-            [lines insertObject:[NSString stringWithFormat:@"%@=%@", value[0], value[1]] atIndex:(NSUInteger)insert++];
-        }
-    }
+    applyIniSettings(lines, settings);
     [fm createDirectoryAtPath:prefs.stringByDeletingLastPathComponent withIntermediateDirectories:YES attributes:nil error:NULL];
     NSError *prefsError = nil;
     BOOL prefsOK = [[lines componentsJoinedByString:@"\n"] writeToFile:prefs atomically:YES encoding:NSISOLatin1StringEncoding error:&prefsError];
-    fprintf(stderr, "[display] render %ux%u -> output %ux%u (%u%%) @ %dHz; upscaler=%s; aa=%s; mouse_accel=%d; user=%s; preferences=%s\n",
+    NSString *fovLog = (opts.fovPreset == 0) ? @"keep" : [NSString stringWithFormat:@"%d/%d", opts.worldFov, opts.firstPersonFov];
+    fprintf(stderr, "[display] render %ux%u -> output %ux%u (%u%%) @ %dHz; upscaler=%s; aa=%s; fov=%s; mouse_accel=%d; user=%s; preferences=%s\n",
             fnv_display_width(), fnv_display_height(), outW, outH, opts.renderScale, self.refreshHz,
             opts.upscaler == 1 ? "metalfx" : "bilinear",
             opts.antiAliasing == 1 ? "smaa" : (opts.antiAliasing == 2 ? "fxaa" : "off"),
+            fovLog.UTF8String,
             opts.mouseAcceleration ? 1 : 0,
             userDir.fileSystemRepresentation,
             prefsOK ? "written" : prefsError.localizedDescription.UTF8String);
