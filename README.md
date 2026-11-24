@@ -8,14 +8,19 @@ A native Apple Silicon (`arm64`) macOS port of **The Elder Scrolls V: Skyrim** (
 
 **What you need upfront:**
 1. An **Apple Silicon Mac** (M1 or newer) running **macOS 14 (Sonoma)** or later.
-2. **Apple Command Line Tools** (`xcode-select --install`) and **[Homebrew](https://brew.sh/)** — `quick-install.sh` automatically installs every other build tool it needs (`ghidra`, `unicorn`, `cmake`, `ffmpeg`, and `mono` for SteamStub DRM) and none of them are required to play once `Skyrim.app` is built (see [Notes on Cleanup](#notes-on-cleanup)).
-3. **Your own Steam PC copy** of original 32-bit *Skyrim* (AppID `72850`, patch `1.9.32.0.8` — not Special/Anniversary Edition), downloaded via `steamcmd` (see [Obtaining the Windows Game Files on macOS](#obtaining-the-windows-game-files-on-macos)).
+2. **Your own Steam PC copy** of original 32-bit *Skyrim* (AppID `72850`, patch `1.9.32.0.8` — not Special/Anniversary Edition). No manual pre-download needed — if no local copy is found, `./quick-install.sh` offers to install `steamcmd` and download your game directly from Steam (or run `./quick-install.sh --download`).
 
 **Build & install:**
 
 ```sh
 ./quick-install.sh
 ```
+
+`quick-install.sh` guides you through the rest interactively:
+- If **Apple Command Line Tools** are missing, it offers to launch `xcode-select --install` and wait until finished.
+- If **[Homebrew](https://brew.sh/)** is missing, it explains where Homebrew lives (`/opt/homebrew`) and that removing it later requires its official uninstall script, then asks for confirmation before installing it.
+- It automatically installs the temporary build/download tools it needs (`ghidra`, `unicorn`, `cmake`, `ffmpeg`, plus `steamcmd` and `mono` for SteamStub DRM when needed) — none are required to play once `Skyrim.app` is built (see [Notes on Cleanup](#notes-on-cleanup)).
+- If no local Skyrim folder is found, it lets you **download from Steam via `steamcmd`** (AppID `72850`) or **enter / drag-and-drop** a Skyrim folder, `TESV.exe`, or `Skyrim.app`.
 
 The finished app is placed in `~/Applications/Skyrim.app`.
 
@@ -39,6 +44,8 @@ The finished app is placed in `~/Applications/Skyrim.app`.
 ---
 
 ## Obtaining the Windows Game Files on macOS
+
+> **Automatic SteamCMD download:** when running interactively without local game files, `./quick-install.sh` offers to install `steamcmd` and download AppID `72850` for you (you can also jump straight to this step with `./quick-install.sh --download`). The manual commands below remain useful as a reference or for non-default setups.
 
 Because original 32-bit *Skyrim* ("Oldrim", AppID `72850`) is a Windows-only release on Steam (unlisted from Steam search, though still purchasable via direct link at `https://store.steampowered.com/app/72850/`), you can fetch the game files directly on your Mac using any of the methods below. All output paths shown here are auto-detected by `quick-install.sh`.
 
@@ -85,11 +92,19 @@ depotdownloader -app 72850 -os windows -username <YOUR_STEAM_USERNAME> \
 ## Quick Install
 
 ```sh
-# Auto-detect game files (Steam, SteamCMD, DepotDownloader, Downloads, Games)
+# Auto-detect game files (Steam, SteamCMD, DepotDownloader, Downloads, Games).
+# If no local copy is found, interactive mode offers to download via steamcmd
+# or enter/drag-and-drop a Skyrim folder or TESV.exe.
 ./quick-install.sh
+
+# Download from Steam via steamcmd (AppID 72850) and build immediately
+./quick-install.sh --download
 
 # Or pass an explicit path
 ./quick-install.sh "/path/to/Skyrim"
+
+# Show all flags
+./quick-install.sh --help
 ```
 
 Optional flags:
@@ -120,7 +135,7 @@ The finished app is installed at `~/Applications/Skyrim.app`.
 
 **None of the build tools are needed to play the game once `Skyrim.app` is built.** `libunicorn.a` is statically linked into the app binary, `.bik` cutscenes are already converted to `.mp4`, and Ghidra only runs during translation.
 
-`quick-install.sh` cleans up leftover source files and `~/Library/Caches/skyrim-macos` automatically upon success (unless `--keep-cache` is passed), and intentionally does **not** uninstall global software from your Mac. At the end of a run, it prints the exact list of any Homebrew packages it installed together with a ready-to-copy `brew uninstall` command.
+`quick-install.sh` cleans up leftover source files and `~/Library/Caches/skyrim-macos` automatically upon success (unless `--keep-cache` is passed), and intentionally does **not** uninstall global software from your Mac. At the end of a run, it prints the exact list of any Homebrew packages it installed together with a ready-to-copy `brew uninstall` command (and if `quick-install.sh` installed Homebrew itself during that run, it also prints the official Homebrew uninstall script command).
 
 If you installed build tools only for this port and want to remove them later:
 

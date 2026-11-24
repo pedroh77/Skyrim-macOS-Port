@@ -5,12 +5,14 @@
 # SteamStub DRM via Steamless CLI + Mono if needed) into a standalone Apple
 # Silicon macOS bundle ("Skyrim.app").
 #
-# Usage: quick-install.sh [--dmg] [--keep-cache] [--keep-ghidra] [--no-steam] [game_files_dir]
+# Usage: quick-install.sh [--download] [--dmg] [--keep-cache] [--keep-ghidra] [--no-steam] [-h|--help] [game_files_dir]
+#   --download       download your Windows copy from Steam via steamcmd (AppID 72850)
 #   --dmg            also wrap the app in "Skyrim.dmg"
 #   --keep-cache     keep ~/Library/Caches/skyrim-macos after a successful build (for faster rebuilds)
 #   --keep-ghidra    keep the Ghidra project and P-code JSONL after translation (implies --keep-cache)
 #   --no-steam       keep the build standalone (skip Steam launcher, Overlay hook & libsteam_api.dylib)
-#   game_files_dir   optional folder containing TESV.exe and Data/
+#   -h, --help       show help text and exit
+#   game_files_dir   optional folder containing TESV.exe and Data/, TESV.exe itself,
 #                    or an existing "Skyrim.app" bundle.
 set -euo pipefail
 
@@ -22,6 +24,8 @@ STEAMLESS_URL="https://github.com/atom0s/Steamless/releases/download/v3.1.0.5/St
 STEAMLESS_ZIP_SHA256="e3e2d22e098ff3fb359b2876aa2bed9596f0501e6ff588cbffae90a76d2dc4f5"
 STEAMWORKS_URL="https://github.com/rlabrecque/Steamworks.NET/releases/download/20.1.0/Steamworks.NET_20.1.0.unitypackage"
 STEAMWORKS_SHA256="3be79e6bdf53c86210267bf39f46362bb839130896006aec26364c5efc37e314"
+HOMEBREW_INSTALL_URL="https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh"
+HOMEBREW_UNINSTALL_URL="https://raw.githubusercontent.com/Homebrew/install/HEAD/uninstall.sh"
 APP_NAME="Skyrim"
 VOLNAME="$APP_NAME"
 DEST_DIR="$HOME/Applications"
@@ -164,31 +168,107 @@ run_task() {
 # ---------------------------------------------------------------------------
 # Options & System Checks
 # ---------------------------------------------------------------------------
+usage() {
+	cat <<'EOF'
+Usage: quick-install.sh [options] [game_files_dir]
+
+Recompiles your PC copy of The Elder Scrolls V: Skyrim (32-bit LE, 1.9.32.0.8)
+into a standalone Apple Silicon macOS app bundle in ~/Applications/Skyrim.app.
+
+Options:
+  --download         Download Windows game files from Steam via steamcmd (AppID 72850)
+  --dmg              Also wrap the built app in "Skyrim.dmg"
+  --keep-cache       Keep ~/Library/Caches/skyrim-macos after building
+  --keep-ghidra      Keep Ghidra project & P-code JSONL (implies --keep-cache)
+  --no-steam         Keep build standalone (skip Steam launcher & Overlay)
+  -h, --help         Show this help message and exit
+
+Arguments:
+  game_files_dir     Optional folder containing TESV.exe and Data/, TESV.exe,
+                     or an existing Skyrim.app bundle
+
+Examples:
+  ./quick-install.sh
+  ./quick-install.sh --download
+  ./quick-install.sh "/path/to/Skyrim"
+EOF
+}
+
 WANT_DMG=no
+WANT_DOWNLOAD=no
 KEEP_CACHE=no
 [ -n "${SKYRIM_KEEP_CACHE:-}" ] && [ "${SKYRIM_KEEP_CACHE}" != "0" ] && KEEP_CACHE=yes || true
 KEEP_GHIDRA=no
 NO_STEAM=no
 GAME_ARG=""
 BREW_INSTALLED=()
+BREW_SELF_INSTALLED=no
+BREW_ADDED_TO_PATH=no
 for arg in "$@"; do
 	case "$arg" in
 		--dmg) WANT_DMG=yes ;;
+		--download) WANT_DOWNLOAD=yes ;;
 		--keep-cache) KEEP_CACHE=yes ;;
 		--keep-ghidra) KEEP_GHIDRA=yes; KEEP_CACHE=yes ;;
 		--no-steam) NO_STEAM=yes ;;
+		-h|--help) usage; exit 0 ;;
 		-*) die "Unknown option: $arg" ;;
 		*) GAME_ARG="$arg" ;;
 	esac
 done
 
+if [ "$WANT_DOWNLOAD" = yes ] && [ -n "$GAME_ARG" ]; then
+	die "Cannot combine --download with an explicit game path."
+fi
+if [ "$WANT_DOWNLOAD" = yes ] && [ ! -t 0 ]; then
+	die "--download requires an interactive terminal (SteamCMD needs your Steam login & Steam Guard)."
+fi
+
+ensure_brew_in_path() {
+	if ! command -v brew >/dev/null 2>&1 && [ -x /opt/homebrew/bin/brew ]; then
+		eval "$(/opt/homebrew/bin/brew shellenv)"
+		BREW_ADDED_TO_PATH=yes
+	fi
+}
+
 require_brew() {
 	local reason="$1"
-	if ! command -v brew >/dev/null 2>&1; then
+	ensure_brew_in_path
+	if command -v brew >/dev/null 2>&1; then
+		return 0
+	fi
+	if [ ! -t 0 ]; then
 		die "Homebrew is required $reason." \
 			"Install Homebrew (https://brew.sh) and re-run this script:" \
-			'  /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"'
+			"  /bin/bash -c \"\$(curl -fsSL $HOMEBREW_INSTALL_URL)\""
 	fi
+	printf '\n'
+	warn "Homebrew is not installed (needed $reason)."
+	printf '    Homebrew is the standard macOS package manager used to install temporary\n'
+	printf '    build/download tools. It is not required to play once Skyrim.app is built.\n'
+	printf '    • Install location (Apple Silicon): %s/opt/homebrew%s\n' "$BOLD" "$RESET"
+	printf '    • Setup may ask for your macOS admin password (sudo).\n'
+	printf '    • Uninstalling Homebrew completely later requires its official uninstall script:\n'
+	printf '      https://github.com/homebrew/install#uninstall-homebrew\n'
+	printf '    • Official install command that will be run:\n'
+	printf '      /bin/bash -c "$(curl -fsSL %s)"\n' "$HOMEBREW_INSTALL_URL"
+	printf '  %s?%s Install Homebrew now? [y/N] ' "$CYAN" "$RESET"
+	read -r REPLY || die "Aborted."
+	case "$REPLY" in
+		[yY]|[yY][eE][sS]|[sS]) ;;
+		*)
+			die "Homebrew is required $reason." \
+				"Install it manually from https://brew.sh and re-run this script."
+			;;
+	esac
+	printf '\n'
+	/bin/bash -c "$(curl -fsSL "$HOMEBREW_INSTALL_URL")" \
+		|| die "Homebrew installation failed or was cancelled."
+	ensure_brew_in_path
+	command -v brew >/dev/null 2>&1 \
+		|| die "Homebrew installation completed, but 'brew' was not found in /opt/homebrew/bin."
+	BREW_SELF_INSTALLED=yes
+	ok "Installed Homebrew into /opt/homebrew"
 }
 
 banner
@@ -204,9 +284,42 @@ if [ "$OS_MAJOR" -lt 14 ]; then
 fi
 
 if ! xcode-select -p >/dev/null 2>&1 || ! xcrun --find clang >/dev/null 2>&1; then
-	die "Apple Command Line Tools / Xcode not found." \
-		"Run: xcode-select --install"
+	if [ ! -t 0 ]; then
+		die "Apple Command Line Tools / Xcode not found." \
+			"Run: xcode-select --install"
+	fi
+	printf '\n'
+	warn "Apple Command Line Tools are not installed (needed for clang, python3, and codesign)."
+	printf '    • Install location: %s/Library/Developer/CommandLineTools%s\n' "$BOLD" "$RESET"
+	printf '    • Can be removed later with: sudo rm -rf /Library/Developer/CommandLineTools\n'
+	printf '  %s?%s Launch Apple'\''s Command Line Tools installer now (xcode-select --install)? [y/N] ' "$CYAN" "$RESET"
+	read -r REPLY || die "Aborted."
+	case "$REPLY" in
+		[yY]|[yY][eE][sS]|[sS])
+			xcode-select --install 2>/dev/null || true
+			printf '    Finish the macOS Command Line Tools installation window that opened,\n'
+			printf '    then press Enter here to continue (or type q to quit): '
+			while ! xcode-select -p >/dev/null 2>&1 || ! xcrun --find clang >/dev/null 2>&1; do
+				read -r REPLY || die "Aborted."
+				case "$REPLY" in
+					[qQ]|[qQ][uU][iI][tT])
+						die "Apple Command Line Tools installation incomplete. Re-run this script once finished."
+						;;
+				esac
+				if ! xcode-select -p >/dev/null 2>&1 || ! xcrun --find clang >/dev/null 2>&1; then
+					printf '    Command Line Tools not ready yet. Press Enter when installation finishes (or type q to quit): '
+				fi
+			done
+			ok "Apple Command Line Tools ready"
+			;;
+		*)
+			die "Apple Command Line Tools / Xcode not found." \
+				"Run: xcode-select --install"
+			;;
+	esac
 fi
+
+ensure_brew_in_path
 
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/skyrim-install.XXXXXX")"
 DEV=""
@@ -231,12 +344,43 @@ trap cleanup EXIT
 # ---------------------------------------------------------------------------
 step "Locating The Elder Scrolls V: Skyrim game files"
 
+resolve_user_input_path() {
+	python3 - "$1" <<'PY'
+import os, shlex, sys
+raw = sys.argv[1]
+stripped = raw.strip()
+if not stripped:
+    sys.exit(0)
+direct = os.path.expanduser(stripped)
+if os.path.exists(direct):
+    print(direct)
+    sys.exit(0)
+try:
+    parts = shlex.split(raw)
+except ValueError:
+    parts = []
+if len(parts) == 1:
+    print(os.path.expanduser(parts[0]))
+else:
+    print(direct)
+PY
+}
+
 resolve_game_dir() {
-	local base="${1%/}" root dir
+	local base="${1%/}" root dir base_lc
+	if [ -f "$base" ]; then
+		base_lc="$(basename "$base" | tr '[:upper:]' '[:lower:]')"
+		if [ "$base_lc" = "tesv.exe" ]; then
+			base="$(dirname "$base")"
+		else
+			return 1
+		fi
+	fi
 	for root in "$base" "$base.app"; do
 		for dir in \
 			"$root" \
 			"$root/Skyrim" \
+			"$root/steamapps/common/Skyrim" \
 			"$root/Contents/Resources/GameData"; do
 			if [ -f "$dir/TESV.exe" ] && [ -f "$dir/Data/Skyrim.esm" ]; then
 				echo "$dir"
@@ -247,8 +391,113 @@ resolve_game_dir() {
 	return 1
 }
 
+download_game_via_steamcmd() {
+	ensure_brew_in_path
+	if ! command -v steamcmd >/dev/null 2>&1; then
+		require_brew "to install steamcmd (and build tools)"
+		if ! command -v steamcmd >/dev/null 2>&1; then
+			local steamcmd_log="$TMP/brew-steamcmd.log"
+			if ! run_task "Installing steamcmd via Homebrew" \
+				bash -c 'brew install --cask steamcmd >"$1" 2>&1' _ "$steamcmd_log"; then
+				cat "$steamcmd_log" >&2 || true
+				die "Failed to install steamcmd via Homebrew."
+			fi
+			BREW_INSTALLED+=(steamcmd)
+		fi
+		command -v steamcmd >/dev/null 2>&1 || die "steamcmd not found after installation."
+	else
+		ok "Found steamcmd ($(command -v steamcmd))"
+	fi
+
+	printf '\n  %sDownloading The Elder Scrolls V: Skyrim (32-bit LE) via SteamCMD (AppID 72850)%s\n' "$BOLD" "$RESET"
+	printf '    • Requires original 32-bit Skyrim (AppID 72850) on your Steam account — not Special/Anniversary Edition.\n'
+	printf '    • Files will download into a temporary cache (~9-12 GB) and be moved into Skyrim.app.\n'
+	printf '    • Enter your Steam account login name (not your public display name).\n'
+	printf '    • SteamCMD will prompt you directly for your password and Steam Guard code\n'
+	printf '      or Mobile Authenticator approval — this script never reads your password.\n\n'
+
+	local steam_user=""
+	while true; do
+		printf '  %s?%s Steam account username (or q to quit): ' "$CYAN" "$RESET"
+		read -r steam_user || die "Aborted."
+		case "$steam_user" in
+			[qQ]|[qQ][uU][iI][tT]) die "Steam download aborted." ;;
+			"") warn "Steam username cannot be empty." ;;
+			*[[:space:]]*) warn "Steam account login names do not contain spaces." ;;
+			*) break ;;
+		esac
+	done
+
+	local download_dir="$CACHE_ROOT/steam-download/72850"
+	local steam_rc files_ok retry_choice new_user
+	while true; do
+		mkdir -p "$download_dir"
+		if [ -d "$download_dir/steamapps" ] && [ ! -f "$download_dir/.steamcmd-complete" ]; then
+			printf '  %sNote:%s Resuming/validating previous download in %s\n' "$DIM" "$RESET" "$download_dir"
+		fi
+		rm -f "$download_dir/.steamcmd-complete"
+
+		printf '\n'
+		steam_rc=0
+		steamcmd \
+			+@sSteamCmdForcePlatformType windows \
+			+force_install_dir "$download_dir" \
+			+login "$steam_user" \
+			+app_update 72850 validate \
+			+quit || steam_rc=$?
+		printf '\n'
+
+		files_ok=no
+		if [ -f "$download_dir/TESV.exe" ] && [ -f "$download_dir/Data/Skyrim.esm" ]; then
+			files_ok=yes
+		fi
+
+		if [ "$steam_rc" -eq 0 ] && [ "$files_ok" = yes ]; then
+			touch "$download_dir/.steamcmd-complete"
+			ASSET_SRC="$download_dir"
+			ok "Downloaded The Elder Scrolls V: Skyrim (AppID 72850) via SteamCMD"
+			break
+		fi
+
+		if [ "$files_ok" = yes ]; then
+			warn "SteamCMD exited with code $steam_rc; the download may be incomplete (retrying will validate missing files)."
+		else
+			warn "SteamCMD finished (exit $steam_rc) without the expected game files in $download_dir."
+			printf '    Common causes: wrong username/password, Steam Guard timeout,\n'
+			printf '    or your Steam account does not own original 32-bit Skyrim (AppID 72850).\n'
+		fi
+
+		while true; do
+			printf '  %s?%s [r] Retry  [q] Quit [r]: ' "$CYAN" "$RESET"
+			read -r retry_choice || die "Aborted."
+			case "$retry_choice" in
+				""|[rR])
+					printf '  %s?%s Steam username [%s]: ' "$CYAN" "$RESET" "$steam_user"
+					read -r new_user || die "Aborted."
+					if [ -n "$new_user" ]; then
+						if [[ "$new_user" == *[[:space:]]* ]]; then
+							warn "Steam account login names do not contain spaces; keeping '$steam_user'."
+						else
+							steam_user="$new_user"
+						fi
+					fi
+					break
+					;;
+				[qQ]|[qQ][uU][iI][tT])
+					die "Steam download aborted."
+					;;
+				*)
+					warn "Please enter r or q."
+					;;
+			esac
+		done
+	done
+}
+
 ASSET_SRC=""
-if [ -n "$GAME_ARG" ]; then
+if [ "$WANT_DOWNLOAD" = yes ]; then
+	download_game_via_steamcmd
+elif [ -n "$GAME_ARG" ]; then
 	ASSET_SRC="$(resolve_game_dir "$GAME_ARG" || true)"
 	[ -n "$ASSET_SRC" ] || die "Could not find TESV.exe + Data/Skyrim.esm in: $GAME_ARG"
 else
@@ -261,21 +510,69 @@ else
 		"$HOME/Games/Skyrim"
 		"$HOME/Downloads/$APP_NAME.app"
 	)
+	if [ -f "$CACHE_ROOT/steam-download/72850/.steamcmd-complete" ]; then
+		CANDIDATES+=("$CACHE_ROOT/steam-download/72850")
+	fi
 	shopt -s nullglob
 	CANDIDATES+=(
 		"$HOME"/Downloads/depots/72850/*
 		"$HOME"/depots/72850/*
 	)
 	shopt -u nullglob
-	for candidate in "${CANDIDATES[@]}"; do
+	for candidate in "${CANDIDATES[@]+"${CANDIDATES[@]}"}"; do
 		ASSET_SRC="$(resolve_game_dir "$candidate" || true)"
 		[ -n "$ASSET_SRC" ] && break
 	done
 fi
 
-[ -n "$ASSET_SRC" ] || die "Skyrim (32-bit LE) folder not found." \
-	"Pass the path to your Skyrim folder (containing TESV.exe and Data/):" \
-	"  ./quick-install.sh \"\$HOME/Library/Application Support/Steam/steamapps/common/Skyrim\""
+if [ -z "$ASSET_SRC" ]; then
+	if [ ! -t 0 ]; then
+		die "Skyrim (32-bit LE) folder not found." \
+			"Run interactively to download from Steam via steamcmd, or pass the path to your Skyrim folder (containing TESV.exe and Data/):" \
+			"  ./quick-install.sh --download" \
+			"  ./quick-install.sh \"\$HOME/Library/Application Support/Steam/steamapps/common/Skyrim\""
+	fi
+
+	while [ -z "$ASSET_SRC" ]; do
+		printf '\n%sNo local copy of Skyrim (32-bit LE) was found.%s\n' "$BOLD" "$RESET"
+		printf 'How would you like to provide your copy?\n'
+		printf '  %s1)%s Download from Steam via steamcmd (AppID 72850 — installs steamcmd if needed)\n' "$GOLD" "$RESET"
+		printf '  %s2)%s Enter or drag-and-drop a Skyrim folder, TESV.exe, or Skyrim.app\n' "$GOLD" "$RESET"
+		printf '  %s3)%s Quit\n' "$GOLD" "$RESET"
+		printf '  Select [1-3]: '
+		read -r REPLY || die "Aborted."
+		case "$REPLY" in
+			1)
+				download_game_via_steamcmd
+				;;
+			2)
+				printf '  %s?%s Drag and drop Skyrim folder or TESV.exe here (or type back): ' "$CYAN" "$RESET"
+				read -r USER_PATH || die "Aborted."
+				case "$USER_PATH" in
+					""|back|BACK|q|Q) continue ;;
+				esac
+				RESOLVED_INPUT="$(resolve_user_input_path "$USER_PATH")"
+				if [ -n "$RESOLVED_INPUT" ]; then
+					ASSET_SRC="$(resolve_game_dir "$RESOLVED_INPUT" || true)"
+					if [ -z "$ASSET_SRC" ]; then
+						if [ ! -e "$RESOLVED_INPUT" ]; then
+							warn "Path not found: $RESOLVED_INPUT"
+						else
+							warn "Could not find TESV.exe + Data/Skyrim.esm in: $RESOLVED_INPUT"
+						fi
+					fi
+				fi
+				;;
+			3|[qQ]|[qQ][uU][iI][tT])
+				printf '\n  No problem. To download Skyrim (AppID 72850) from Steam next time, run ./quick-install.sh --download.\n\n'
+				exit 0
+				;;
+			*)
+				warn "Please enter 1, 2, or 3."
+				;;
+		esac
+	done
+fi
 
 ok "Found game files at: $ASSET_SRC"
 
@@ -300,7 +597,12 @@ is_supported_unpacked_sha() {
 unpack_steam_drm() {
 	if ! command -v mono >/dev/null 2>&1; then
 		require_brew "to install Mono for Steamless"
-		run_task "Installing Mono runtime via Homebrew" brew install mono
+		local mono_log="$TMP/brew-mono.log"
+		if ! run_task "Installing Mono runtime via Homebrew" \
+			bash -c 'brew install mono >"$1" 2>&1' _ "$mono_log"; then
+			cat "$mono_log" >&2 || true
+			die "Failed to install Mono via Homebrew."
+		fi
 		BREW_INSTALLED+=(mono)
 	fi
 	local mono_bin
@@ -396,7 +698,12 @@ for pkg in ghidra unicorn cmake ffmpeg; do
 done
 
 if [ ${#MISSING_BREW[@]} -gt 0 ]; then
-	run_task "Installing via Homebrew: ${MISSING_BREW[*]}" brew install "${MISSING_BREW[@]}"
+	BREW_TOOLS_LOG="$TMP/brew-tools.log"
+	if ! run_task "Installing via Homebrew: ${MISSING_BREW[*]}" \
+		bash -c 'log="$1"; shift; brew install "$@" >"$log" 2>&1' _ "$BREW_TOOLS_LOG" "${MISSING_BREW[@]}"; then
+		cat "$BREW_TOOLS_LOG" >&2 || true
+		die "Failed to install Homebrew packages: ${MISSING_BREW[*]}"
+	fi
 	BREW_INSTALLED+=("${MISSING_BREW[@]}")
 fi
 
@@ -417,8 +724,13 @@ if [ -f "$CODEC_PREFIX/codec-manifest.json" ] && \
    python3 -c "import sys; sys.path.insert(0, '$SCRIPT_DIR/tools'); from native_codecs import validate; validate('$CODEC_PREFIX', 'macos')" >/dev/null 2>&1; then
 	ok "Using cached macOS Ogg/Vorbis codecs"
 else
-	run_task "Building pinned Ogg/Vorbis static libraries" \
-		python3 "$SCRIPT_DIR/tools/build_codecs.py" macos --out "$CODECS_DIR"
+	CODECS_LOG="$TMP/codecs.log"
+	if ! run_task "Building pinned Ogg/Vorbis static libraries" \
+		bash -c 'python3 "$1" macos --out "$2" >"$3" 2>&1' _ \
+		"$SCRIPT_DIR/tools/build_codecs.py" "$CODECS_DIR" "$CODECS_LOG"; then
+		cat "$CODECS_LOG" >&2 || true
+		die "Building Ogg/Vorbis codecs failed."
+	fi
 fi
 
 # ---------------------------------------------------------------------------
@@ -701,6 +1013,9 @@ cleanup_source_leftovers() {
 				rmdir "$(dirname "$src")" 2>/dev/null || true
 				rmdir "$(dirname "$(dirname "$src")")" 2>/dev/null || true
 				;;
+			*/steam-download/*)
+				rmdir "$(dirname "$src")" 2>/dev/null || true
+				;;
 		esac
 	fi
 }
@@ -715,10 +1030,21 @@ cleanup_build_cache() {
 }
 
 print_post_install_notes() {
+	local brew_cmd="brew"
+	if [ "$BREW_SELF_INSTALLED" = yes ] || [ "$BREW_ADDED_TO_PATH" = yes ]; then
+		brew_cmd="/opt/homebrew/bin/brew"
+	fi
 	if [ ${#BREW_INSTALLED[@]} -gt 0 ]; then
 		printf '\n  %sHomebrew packages installed during this run:%s %s\n' "$BOLD" "$RESET" "${BREW_INSTALLED[*]}"
 		printf '  None of them are required to play. To uninstall them later:\n'
-		printf '    brew uninstall %s && brew cleanup\n' "${BREW_INSTALLED[*]}"
+		printf '    %s uninstall %s && %s cleanup\n' "$brew_cmd" "${BREW_INSTALLED[*]}" "$brew_cmd"
+	fi
+	if [ "$BREW_SELF_INSTALLED" = yes ]; then
+		printf '\n  %sHomebrew itself was installed into /opt/homebrew during this run.%s\n' "$BOLD" "$RESET"
+		printf '  It is not required to play. To uninstall Homebrew completely later, run its official script:\n'
+		printf '    /bin/bash -c "$(curl -fsSL %s)"\n' "$HOMEBREW_UNINSTALL_URL"
+		printf '  Or to keep using brew in future Terminal sessions, run:\n'
+		printf '    echo '\''eval "$(/opt/homebrew/bin/brew shellenv)"'\'' >> ~/.zprofile\n'
 	fi
 	printf '\n'
 }
