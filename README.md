@@ -1,8 +1,14 @@
 # The Elder Scrolls V: Skyrim (32-bit LE) for macOS (Apple Silicon)
 
+> **Archived:** Skyrim now ships as part of
+> [**pedroh77/Fallout-ElderScrolls-macOS-Port**](https://github.com/pedroh77/Fallout-ElderScrolls-macOS-Port),
+> where Fallout 3, Fallout: New Vegas and Skyrim share one recompiler, Metal backend and installer
+> (`./quick-install.sh --game skyrim`). This repository is read-only and kept for history — please use
+> the new repository for downloads, issues and pull requests.
+
 A native Apple Silicon (`arm64`) macOS port of **The Elder Scrolls V: Skyrim** (32-bit DirectX 9 "Oldrim", build `1.9.32.0.8`) using **x86-to-C/ARM64 static recompilation** and direct **Direct3D 9 → Apple Metal** translation, packaged as a standalone `Skyrim.app` bundle with no Wine, CrossOver, Rosetta 2, or virtual machines required.
 
-> **Status:** Active porting effort adapted from the Fallout: New Vegas macOS static recompiler architecture.
+> **Status:** Archived. Development continues in [pedroh77/Fallout-ElderScrolls-macOS-Port](https://github.com/pedroh77/Fallout-ElderScrolls-macOS-Port).
 
 ## Quick Start
 
